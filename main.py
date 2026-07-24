@@ -5,7 +5,7 @@ from pathlib import Path
 
 import database
 from country import Country, GovernmentType
-from division import Division, DivisionType
+from division import AirForceDivision, Division, DivisionType
 from node import BuildingType, MilitaryDeployment, Node, Terrain
 
 HELP_TEXT = "See README.md for the full list of commands."
@@ -31,6 +31,23 @@ class World:
         return self.countries.get(name)
 
 
+def format_division_summary(division: Division) -> str:
+    return (
+        f"{division.get_name()} [{division.get_id()}]: {division.get_division_type().name}, "
+        f"{division.get_manpower()} men, supply {division.get_supply_requirement()}, "
+        f"morale {division.get_morale()}"
+    )
+
+
+def format_division_extra(division: Division) -> str | None:
+    if isinstance(division, AirForceDivision):
+        return (
+            f"{division.get_aircraft_count()}x {division.get_aircraft_type()}, "
+            f"equipment rating {division.get_equipment_rating()}, range {division.get_range()}"
+        )
+    return None
+
+
 def format_node(node: Node) -> str:
     lines = [
         f"Node: {node.get_id()}",
@@ -51,11 +68,10 @@ def format_node(node: Node) -> str:
         for dep in deployments:
             lines.append(f"    {dep.country}: {dep.get_strength()} men across {len(dep.get_divisions())} division(s)")
             for division in dep.get_divisions():
-                lines.append(
-                    f"      {division.get_id()}: {division.get_division_type().name}, "
-                    f"{division.get_manpower()} men, supply {division.get_supply_requirement()}, "
-                    f"morale {division.get_morale()}"
-                )
+                lines.append(f"      {format_division_summary(division)}")
+                extra = format_division_extra(division)
+                if extra:
+                    lines.append(f"        {extra}")
     return "\n".join(lines)
 
 
@@ -66,6 +82,8 @@ def format_country(country: Country) -> str:
         f"  Treasury: {country.get_treasury()}",
         f"  Stability: {country.get_stability()}",
         f"  Nodes ({country.get_node_count()}): {', '.join(country.get_nodes()) or 'none'}",
+        f"  Reserve divisions ({len(country.get_reserve_divisions())}): "
+        f"{', '.join(d.get_name() for d in country.get_reserve_divisions()) or 'none'}",
     ]
     return "\n".join(lines)
 
@@ -78,6 +96,15 @@ def get_country_divisions(world: World, country_name: str) -> list[Division]:
     return divisions
 
 
+def format_division_line(division: Division) -> str:
+    location = division.get_location() or "reserve"
+    line = f"  {format_division_summary(division)}, location {location}"
+    extra = format_division_extra(division)
+    if extra:
+        line += f"\n      {extra}"
+    return line
+
+
 def format_country_status(country: Country) -> str:
     lines = [
         f"Country: {country.get_name()}",
@@ -86,6 +113,7 @@ def format_country_status(country: Country) -> str:
         f"  Government: {country.get_government_type().name}",
         f"  Treasury: {country.get_treasury()}",
         f"  Stability: {country.get_stability()}",
+        f"  Reserve divisions: {len(country.get_reserve_divisions())}",
     ]
     return "\n".join(lines)
 
@@ -191,6 +219,20 @@ def cmd_world_status(world: World) -> None:
         print(f"  {country.get_name()}: GDP {country.get_economic_output():.2f}, population {country.get_population()}")
 
 
+def cmd_world_divisions(world: World) -> None:
+    if not world.countries:
+        print("No countries yet.")
+        return
+    for country in world.countries.values():
+        divisions = get_country_divisions(world, country.get_name()) + country.get_reserve_divisions()
+        print(f"{country.get_name()}:")
+        if not divisions:
+            print("  none")
+            continue
+        for division in divisions:
+            print(format_division_line(division))
+
+
 def cmd_projections(world: World) -> None:
     if not world.countries:
         print("No countries yet.")
@@ -208,19 +250,16 @@ def cmd_country_divisions(world: World, args: list[str]) -> None:
         print("Usage: country-divisions <country>")
         return
     country_name = args[0]
-    if world.get_country(country_name) is None:
+    country = world.get_country(country_name)
+    if country is None:
         print(f"No such country '{country_name}'.")
         return
-    divisions = get_country_divisions(world, country_name)
+    divisions = get_country_divisions(world, country_name) + country.get_reserve_divisions()
     if not divisions:
-        print(f"'{country_name}' has no divisions deployed.")
+        print(f"'{country_name}' has no divisions.")
         return
     for division in divisions:
-        print(
-            f"  {division.get_id()}: {division.get_division_type().name}, "
-            f"{division.get_manpower()} men, supply {division.get_supply_requirement()}, "
-            f"morale {division.get_morale()}, location {division.get_location()}"
-        )
+        print(format_division_line(division))
 
 
 def cmd_country_status(world: World, args: list[str]) -> None:
@@ -361,19 +400,37 @@ def cmd_build(world: World, args: list[str], enable: bool) -> None:
     print(f"{building.name} {'enabled' if enable else 'disabled'} at '{node_id}'.")
 
 
+def find_division_by_name(world: World, country_name: str, name: str) -> Division | None:
+    for division in get_country_divisions(world, country_name):
+        if division.get_name() == name:
+            return division
+    country = world.get_country(country_name)
+    if country is not None:
+        found = country.find_reserve_division(name)
+        if found is not None:
+            return found
+    return None
+
+
 def cmd_deploy(world: World, args: list[str]) -> None:
-    if len(args) != 5:
-        print("Usage: deploy <id> <country> <division_type> <manpower> <supply_requirement>")
+    if len(args) != 6:
+        print("Usage: deploy <id> <country> <name> <division_type> <manpower> <supply_requirement>")
         return
-    node_id, country, division_type_str, manpower_str, supply_str = args
+    node_id, country, name, division_type_str, manpower_str, supply_str = args
     node = world.get_node(node_id)
     if node is None:
         print(f"No such node '{node_id}'.")
+        return
+    if find_division_by_name(world, country, name) is not None:
+        print(f"'{country}' already has a division named '{name}'.")
         return
     try:
         division_type = DivisionType[division_type_str.upper()]
     except KeyError:
         print(f"Unknown division type '{division_type_str}'. Use 'division-types' to list options.")
+        return
+    if division_type == DivisionType.AIR_FORCE:
+        print("Use 'deploy-airforce' for AIR_FORCE divisions (they need aircraft details).")
         return
     try:
         manpower = int(manpower_str)
@@ -385,27 +442,183 @@ def cmd_deploy(world: World, args: list[str]) -> None:
     if deployment is None:
         deployment = MilitaryDeployment(country=country)
         node.military_deployments.append(deployment)
-    division_id = f"div_{len(deployment.divisions) + 1}"
-    deployment.divisions.append(
-        Division(
-            id=division_id,
-            division_type=division_type,
-            manpower=manpower,
-            supply_requirement=supply_requirement,
-            location=node_id,
-        )
+    division = Division.create(
+        country=country,
+        name=name,
+        division_type=division_type,
+        manpower=manpower,
+        supply_requirement=supply_requirement,
+        location=node_id,
     )
-    print(f"Deployed {division_type.name} division ({manpower} men) for {country} at '{node_id}'.")
+    deployment.divisions.append(division)
+    print(f"Deployed {division_type.name} division '{name}' ({manpower} men) for {country} at '{node_id}'.")
+
+
+def cmd_create_division(world: World, args: list[str]) -> None:
+    if len(args) != 5:
+        print("Usage: create-division <country> <name> <division_type> <manpower> <supply_requirement>")
+        return
+    country_name, name, division_type_str, manpower_str, supply_str = args
+    country = world.get_country(country_name)
+    if country is None:
+        print(f"No such country '{country_name}'.")
+        return
+    if find_division_by_name(world, country_name, name) is not None:
+        print(f"'{country_name}' already has a division named '{name}'.")
+        return
+    try:
+        division_type = DivisionType[division_type_str.upper()]
+    except KeyError:
+        print(f"Unknown division type '{division_type_str}'. Use 'division-types' to list options.")
+        return
+    if division_type == DivisionType.AIR_FORCE:
+        print("Use 'create-airforce-division' for AIR_FORCE divisions (they need aircraft details).")
+        return
+    try:
+        manpower = int(manpower_str)
+        supply_requirement = float(supply_str)
+    except ValueError:
+        print("Manpower must be an integer and supply requirement must be a number.")
+        return
+    division = Division.create(
+        country=country_name,
+        name=name,
+        division_type=division_type,
+        manpower=manpower,
+        supply_requirement=supply_requirement,
+        location=None,
+    )
+    country.reserve_divisions.append(division)
+    print(f"Created {division_type.name} division '{name}' ({manpower} men) in reserve for {country_name}.")
+
+
+def _parse_airforce_args(
+    manpower_str: str, supply_str: str, rating_str: str, count_str: str, range_str: str
+) -> tuple[int, float, float, int, float] | None:
+    try:
+        return (
+            int(manpower_str),
+            float(supply_str),
+            float(rating_str),
+            int(count_str),
+            float(range_str),
+        )
+    except ValueError:
+        return None
+
+
+def cmd_create_airforce_division(world: World, args: list[str]) -> None:
+    if len(args) != 8:
+        print(
+            "Usage: create-airforce-division <country> <name> <manpower> <supply_requirement> "
+            "<aircraft_type> <equipment_rating> <aircraft_count> <range>"
+        )
+        return
+    country_name, name, manpower_str, supply_str, aircraft_type, rating_str, count_str, range_str = args
+    country = world.get_country(country_name)
+    if country is None:
+        print(f"No such country '{country_name}'.")
+        return
+    if find_division_by_name(world, country_name, name) is not None:
+        print(f"'{country_name}' already has a division named '{name}'.")
+        return
+    parsed = _parse_airforce_args(manpower_str, supply_str, rating_str, count_str, range_str)
+    if parsed is None:
+        print("Manpower and aircraft count must be integers; supply, equipment rating, and range must be numbers.")
+        return
+    manpower, supply_requirement, equipment_rating, aircraft_count, aircraft_range = parsed
+    division = AirForceDivision.create_air_force(
+        country=country_name,
+        name=name,
+        manpower=manpower,
+        supply_requirement=supply_requirement,
+        aircraft_type=aircraft_type,
+        equipment_rating=equipment_rating,
+        aircraft_count=aircraft_count,
+        range=aircraft_range,
+        location=None,
+    )
+    country.reserve_divisions.append(division)
+    print(f"Created AIR_FORCE division '{name}' ({aircraft_count}x {aircraft_type}) in reserve for {country_name}.")
+
+
+def cmd_deploy_airforce(world: World, args: list[str]) -> None:
+    if len(args) != 9:
+        print(
+            "Usage: deploy-airforce <id> <country> <name> <manpower> <supply_requirement> "
+            "<aircraft_type> <equipment_rating> <aircraft_count> <range>"
+        )
+        return
+    node_id, country_name, name, manpower_str, supply_str, aircraft_type, rating_str, count_str, range_str = args
+    node = world.get_node(node_id)
+    if node is None:
+        print(f"No such node '{node_id}'.")
+        return
+    if find_division_by_name(world, country_name, name) is not None:
+        print(f"'{country_name}' already has a division named '{name}'.")
+        return
+    parsed = _parse_airforce_args(manpower_str, supply_str, rating_str, count_str, range_str)
+    if parsed is None:
+        print("Manpower and aircraft count must be integers; supply, equipment rating, and range must be numbers.")
+        return
+    manpower, supply_requirement, equipment_rating, aircraft_count, aircraft_range = parsed
+    deployment = next((d for d in node.military_deployments if d.country == country_name), None)
+    if deployment is None:
+        deployment = MilitaryDeployment(country=country_name)
+        node.military_deployments.append(deployment)
+    division = AirForceDivision.create_air_force(
+        country=country_name,
+        name=name,
+        manpower=manpower,
+        supply_requirement=supply_requirement,
+        aircraft_type=aircraft_type,
+        equipment_rating=equipment_rating,
+        aircraft_count=aircraft_count,
+        range=aircraft_range,
+        location=node_id,
+    )
+    deployment.divisions.append(division)
+    print(f"Deployed AIR_FORCE division '{name}' ({aircraft_count}x {aircraft_type}) for {country_name} at '{node_id}'.")
+
+
+def cmd_deploy_reserve(world: World, args: list[str]) -> None:
+    if len(args) != 3:
+        print("Usage: deploy-reserve <country> <name> <node_id>")
+        return
+    country_name, name, node_id = args
+    country = world.get_country(country_name)
+    if country is None:
+        print(f"No such country '{country_name}'.")
+        return
+    node = world.get_node(node_id)
+    if node is None:
+        print(f"No such node '{node_id}'.")
+        return
+    division = country.remove_reserve_division(name)
+    if division is None:
+        print(f"'{country_name}' has no reserve division named '{name}'.")
+        return
+    division.location = node_id
+    deployment = next((d for d in node.military_deployments if d.country == country_name), None)
+    if deployment is None:
+        deployment = MilitaryDeployment(country=country_name)
+        node.military_deployments.append(deployment)
+    deployment.divisions.append(division)
+    print(f"Deployed reserve division '{name}' for {country_name} to '{node_id}'.")
+
+
+def refresh_country_stats(world: World) -> None:
+    for country in world.countries.values():
+        country.update_economic_output(world.nodes)
+        country.update_population(world.nodes)
+        country.update_projected_growth_rates(world.nodes)
 
 
 def advance_year(world: World) -> None:
     world.year += 1
     for node in world.nodes.values():
         node.advance_year()
-    for country in world.countries.values():
-        country.update_economic_output(world.nodes)
-        country.update_population(world.nodes)
-        country.update_projected_growth_rates(world.nodes)
+    refresh_country_stats(world)
 
 
 def cmd_open(world: World, args: list[str]) -> None:
@@ -533,6 +746,14 @@ def run_command(world: World, raw: str) -> bool:
         cmd_build(world, args, enable=False)
     elif command == "deploy":
         cmd_deploy(world, args)
+    elif command == "create-division":
+        cmd_create_division(world, args)
+    elif command == "create-airforce-division":
+        cmd_create_airforce_division(world, args)
+    elif command == "deploy-airforce":
+        cmd_deploy_airforce(world, args)
+    elif command == "deploy-reserve":
+        cmd_deploy_reserve(world, args)
     elif command == "buildings":
         print(", ".join(b.name for b in BuildingType))
     elif command == "terrains":
@@ -555,11 +776,16 @@ def run_command(world: World, raw: str) -> bool:
     elif command == "advance-year":
         advance_year(world)
         print(f"Year advanced to {world.year}.")
+    elif command == "forceupdate":
+        refresh_country_stats(world)
+        print(f"Recalculated stats for {len(world.countries)} countries.")
     elif command == "world":
         if args and args[0] == "status":
             cmd_world_status(world)
+        elif args and args[0] == "divisions":
+            cmd_world_divisions(world)
         else:
-            print("Usage: world status")
+            print("Usage: world status | world divisions")
     elif command == "projections":
         cmd_projections(world)
     elif command == "country-divisions":

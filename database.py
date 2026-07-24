@@ -5,7 +5,7 @@ from pathlib import Path
 from typing import Any
 
 from country import Country, GovernmentType
-from division import Division, DivisionType
+from division import AirForceDivision, Division, DivisionType, seed_division_id_counter
 from node import BuildingType, MilitaryDeployment, Node, Terrain
 
 DEFAULT_SAVE_DIR = Path.home() / "proppunk game files"
@@ -47,19 +47,41 @@ def rename_world(old_name: str, new_name: str) -> Path:
 
 
 def _division_to_dict(division: Division) -> dict[str, Any]:
-    return {
+    result = {
         "id": division.id,
+        "name": division.name,
         "division_type": division.division_type.name,
         "manpower": division.manpower,
         "supply_requirement": division.supply_requirement,
         "morale": division.morale,
         "location": division.location,
     }
+    if isinstance(division, AirForceDivision):
+        result["aircraft_type"] = division.aircraft_type
+        result["equipment_rating"] = division.equipment_rating
+        result["aircraft_count"] = division.aircraft_count
+        result["range"] = division.range
+    return result
 
 
 def _division_from_dict(data: dict[str, Any]) -> Division:
+    if data["division_type"] == "AIR_FORCE":
+        return AirForceDivision(
+            id=data["id"],
+            name=data.get("name", data["id"]),
+            division_type=DivisionType.AIR_FORCE,
+            manpower=data["manpower"],
+            supply_requirement=data["supply_requirement"],
+            morale=data["morale"],
+            location=data["location"],
+            aircraft_type=data.get("aircraft_type", ""),
+            equipment_rating=data.get("equipment_rating", 0.0),
+            aircraft_count=data.get("aircraft_count", 0),
+            range=data.get("range", 0.0),
+        )
     return Division(
         id=data["id"],
+        name=data.get("name", data["id"]),
         division_type=DivisionType[data["division_type"]],
         manpower=data["manpower"],
         supply_requirement=data["supply_requirement"],
@@ -127,6 +149,7 @@ def _country_to_dict(country: Country) -> dict[str, Any]:
         "population": country.population,
         "projected_economic_growth_rate": country.projected_economic_growth_rate,
         "projected_population_growth_rate": country.projected_population_growth_rate,
+        "reserve_divisions": [_division_to_dict(d) for d in country.reserve_divisions],
     }
 
 
@@ -141,6 +164,7 @@ def _country_from_dict(data: dict[str, Any]) -> Country:
         population=data["population"],
         projected_economic_growth_rate=data.get("projected_economic_growth_rate", 0.0),
         projected_population_growth_rate=data.get("projected_population_growth_rate", 0.0),
+        reserve_divisions=[_division_from_dict(d) for d in data.get("reserve_divisions", [])],
     )
 
 
@@ -151,6 +175,33 @@ def save_world(world: Any, path: str) -> None:
         "countries": {name: _country_to_dict(country) for name, country in world.countries.items()},
     }
     Path(path).write_text(json.dumps(data, indent=2))
+
+
+def _division_number_for_country(division_id: str, country: str) -> int | None:
+    prefix = f"{country}_div_"
+    if division_id.startswith(prefix) and division_id[len(prefix) :].isdigit():
+        return int(division_id[len(prefix) :])
+    return None
+
+
+def _seed_division_id_counters(world: Any) -> None:
+    max_by_country: dict[str, int] = {}
+
+    def note(division_id: str, country: str) -> None:
+        number = _division_number_for_country(division_id, country)
+        if number is not None:
+            max_by_country[country] = max(max_by_country.get(country, 0), number)
+
+    for node in world.nodes.values():
+        for deployment in node.military_deployments:
+            for division in deployment.divisions:
+                note(division.id, deployment.country)
+    for country in world.countries.values():
+        for division in country.reserve_divisions:
+            note(division.id, country.name)
+
+    for country, max_number in max_by_country.items():
+        seed_division_id_counter(country, max_number + 1)
 
 
 def load_into_world(world: Any, path: str) -> None:
@@ -165,3 +216,5 @@ def load_into_world(world: Any, path: str) -> None:
         world.countries[name] = _country_from_dict(country_data)
 
     world.year = data.get("year", 0)
+
+    _seed_division_id_counters(world)

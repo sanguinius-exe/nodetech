@@ -3,6 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from enum import Enum, auto
 
+from division import Division
 from node import Node
 
 
@@ -27,6 +28,7 @@ class Country:
     population: int = 0
     projected_economic_growth_rate: float = 0.0
     projected_population_growth_rate: float = 0.0
+    reserve_divisions: list[Division] = field(default_factory=list)
 
     def get_name(self) -> str:
         return self.name
@@ -57,6 +59,18 @@ class Country:
 
     def get_projected_population_growth_rate(self) -> float:
         return self.projected_population_growth_rate
+
+    def get_reserve_divisions(self) -> list[Division]:
+        return self.reserve_divisions
+
+    def find_reserve_division(self, name: str) -> Division | None:
+        return next((d for d in self.reserve_divisions if d.name == name), None)
+
+    def remove_reserve_division(self, name: str) -> Division | None:
+        division = self.find_reserve_division(name)
+        if division is not None:
+            self.reserve_divisions.remove(division)
+        return division
 
     def calculate_economic_output(self, all_nodes: dict[str, Node]) -> float:
         return sum(all_nodes[node_id].get_economic_output() for node_id in self.nodes if node_id in all_nodes)
