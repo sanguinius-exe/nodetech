@@ -8,7 +8,7 @@ nodetech is a single-process, in-memory text game. Everything lives in one `Worl
 
 ```
 main.py        terminal loop, command parsing/dispatch, World container
-node.py        Node, MilitaryDeployment, Terrain, BuildingType
+node.py        Node, MilitaryDeployment, Terrain, BuildingType, ResourceType, ExtractionSiteType
 country.py     Country, GovernmentType
 division.py    Division, AirForceDivision, DivisionType, ID generation
 database.py    JSON (de)serialization, save-file location/naming
@@ -95,12 +95,28 @@ A single map tile — the core unit the whole game is built on.
 | `terrain` | `Terrain` | PLAINS / FOREST / HILLS / MOUNTAIN / DESERT / WATER / URBAN |
 | `connected_tiles` | `list[str]` | IDs of adjacent/linked nodes (bidirectional; `connect` maintains both sides) |
 | `building_options` | `list[bool]` | One flag per `BuildingType`, indexed by `BuildingType.value - 1` (see below) |
-| `economic_output` / `economic_growth_rate` | `float` | Current output, and its growth rate — **auto-calculated every year**, not player-set. See below |
+| `resources` | `list[bool]` | One flag per `ResourceType` (`BASIC_MATERIALS` / `RARE_EARTH_METALS` / `OIL_GAS`), same positional-array pattern as `building_options` |
+| `extraction_sites` | `list[bool]` | One flag per `ExtractionSiteType`, same positional-array pattern — see "Resources and extraction sites" below |
+| `economic_output` / `economic_growth_rate` | `float` | Current output, and its growth rate — **auto-calculated**, not player-set. See below |
 | `population` / `population_growth_rate` | `int` / `float` | Current population and its annual compounding rate — this one *is* set manually (`setpopgrowth`) |
 | `military_deployments` | `list[MilitaryDeployment]` | All deployments currently on this tile, from any country |
 | `projected_population_growth_rate` | `float` | A simulation-derived *forecast* for population growth — informational only, doesn't drive anything. There is no equivalent "projected" field for economic growth, since `economic_growth_rate` itself now plays that role — see below |
 
-**`building_options` indexing**: this is a parallel boolean array, not a set of building names. `BuildingType` is an `Enum` using `auto()`, so members are numbered 1..N in declaration order (`FARM=1, MINE=2, ...`). `Node.has_building(bt)` reads `building_options[bt.value - 1]`; `main.py`'s `build`/`unbuild` commands write to that same index. If `BuildingType` gains or loses a member, every existing `building_options` list (including ones in save files) shifts out of alignment — see "Known limitations" below.
+**`building_options`/`resources`/`extraction_sites` indexing**: these are parallel boolean arrays, not sets of names. Each corresponding `Enum` uses `auto()`, so members are numbered 1..N in declaration order (`FARM=1, MINE=2, ...`). `Node.has_building(bt)`/`has_resource(rt)`/`has_extraction_site(st)` read `<list>[x.value - 1]`; the corresponding `build`/`unbuild`, `addresource`/`removeresource`, `build-extraction`/`unbuild-extraction` commands write to that same index. If any of these enums gains or loses a member, every existing list of that kind (including ones in save files) shifts out of alignment — see "Known limitations" below.
+
+#### Resources and extraction sites
+
+`ResourceType` (`BASIC_MATERIALS`, `RARE_EARTH_METALS`, `OIL_GAS`) represents what a node naturally has; it's set directly with `addresource`/`removeresource` — there's no procedural generation or terrain linkage, it's purely player-declared. `ExtractionSiteType` (`BASIC_MATERIALS_MINE`, `RARE_EARTH_MINE`, `OIL_RIG`) represents a structure built to exploit a resource, gated by `EXTRACTION_SITE_RESOURCE_REQUIREMENTS: dict[ExtractionSiteType, ResourceType]` — a fixed 1:1 mapping from each site type to the resource it requires:
+
+```python
+EXTRACTION_SITE_RESOURCE_REQUIREMENTS = {
+    ExtractionSiteType.BASIC_MATERIALS_MINE: ResourceType.BASIC_MATERIALS,
+    ExtractionSiteType.RARE_EARTH_MINE: ResourceType.RARE_EARTH_METALS,
+    ExtractionSiteType.OIL_RIG: ResourceType.OIL_GAS,
+}
+```
+
+`Node.can_build_extraction_site(site_type)` checks `has_resource(EXTRACTION_SITE_RESOURCE_REQUIREMENTS[site_type])`; `cmd_extraction` in `main.py` calls this before allowing `build-extraction` to proceed (removal via `unbuild-extraction` is never gated). Once built, an extraction site contributes to economic growth via `ECONOMIC_GROWTH_EXTRACTION_SITE_MODIFIERS` — a separate, much larger modifier table than the one for ordinary buildings (its smallest entry is triple the strongest building modifier), so resource extraction is meant to be a significant, deliberate economic strategy rather than an incremental optimization like a building. There is no equivalent population-growth modifier for extraction sites; they only affect the economic side.
 
 #### How growth rates are calculated
 
@@ -111,18 +127,20 @@ sigmoid = 1.0 / (1.0 + math.exp(-(gdp_per_capita - GDP_PER_CAPITA_MIDPOINT) / GD
 base_rate = ceiling - (ceiling - floor) * sigmoid
 ```
 
-`GDP_PER_CAPITA_LOW`/`GDP_PER_CAPITA_HIGH` (`200`/`1500`) mark where the curve is meant to sit near the ceiling and near the floor respectively; `GDP_PER_CAPITA_MIDPOINT` is their average (`850`, the curve's inflection point — exactly halfway between floor and ceiling) and `GDP_PER_CAPITA_STEEPNESS` is a quarter of their span (`325`), which places the curve's steepest transition roughly within `[LOW, HIGH]` (at `LOW`/`HIGH` the sigmoid is at ≈12%/≈88% of its full swing; it asymptotically approaches but never exactly reaches 0%/100% beyond that). All four are flagged as tunable since the game has no fixed definition of what a unit of `economic_output` represents. Economic growth is bounded `[1.5%, 5%]`; population growth `[0.5%, 3.5%]` (narrower, since population is assumed to respond less elastically to wealth than output does). Each building the node has enabled then nudges the rate up or down via a flat per-building modifier (`ECONOMIC_GROWTH_BUILDING_MODIFIERS`/`POPULATION_GROWTH_BUILDING_MODIFIERS`, e.g. `FACTORY` boosts economic growth but slightly dampens population growth), and the result is re-clamped into the floor/ceiling range so a stack of modifiers can't push a node's rate outside the intended band.
+`GDP_PER_CAPITA_LOW`/`GDP_PER_CAPITA_HIGH` (`200`/`1500`) mark where the curve is meant to sit near the ceiling and near the floor respectively; `GDP_PER_CAPITA_MIDPOINT` is their average (`850`, the curve's inflection point — exactly halfway between floor and ceiling) and `GDP_PER_CAPITA_STEEPNESS` is a quarter of their span (`325`), which places the curve's steepest transition roughly within `[LOW, HIGH]` (at `LOW`/`HIGH` the sigmoid is at ≈12%/≈88% of its full swing; it asymptotically approaches but never exactly reaches 0%/100% beyond that). All four are flagged as tunable since the game has no fixed definition of what a unit of `economic_output` represents. Economic growth is bounded `[1.5%, 5%]`; population growth `[0.5%, 3.5%]` (narrower, since population is assumed to respond less elastically to wealth than output does). Each building the node has enabled nudges the rate up or down via a flat per-building modifier (`ECONOMIC_GROWTH_BUILDING_MODIFIERS`/`POPULATION_GROWTH_BUILDING_MODIFIERS`, e.g. `FACTORY` boosts economic growth but slightly dampens population growth); each extraction site adds a much larger economic-only modifier (`ECONOMIC_GROWTH_EXTRACTION_SITE_MODIFIERS`, population growth is untouched). The combined result is re-clamped into the floor/ceiling range afterward, so a stack of modifiers can't push a node's rate outside the intended band.
 
 **Economic and population growth are handled asymmetrically**, and this is deliberate: economic growth used to have its own manually-set `economic_growth_rate` (with a `seteconomygrowth` command), separate from a purely informational `projected_economic_growth_rate` calculated by this same formula. That distinction was collapsed — `economic_growth_rate` is now *always* the freshly-calculated value; there's no manual override and no separate "projected" field for it anymore. Population kept the older two-field design: `population_growth_rate` is still player-set and is what actually grows the population, while `projected_population_growth_rate` remains a separate, non-driving forecast calculated with the same kind of formula.
 
+**Calculation is live, not just an annual side effect.** `calculate_economic_growth_rate()`/`calculate_projected_population_growth_rate()` are pure functions of the node's *current* state — nothing about them is tied to `advance_year()`. `main.py`'s `format_node()` (used by `view`) calls them directly every time, so the displayed rate always reflects whatever the node's population/economic output/buildings/extraction sites currently are, even if you've never called `advance-year` or just changed something with `seteconomy`/`build`/`build-extraction`. The stored `economic_growth_rate` field still exists and is still what `advance_year()` uses to actually grow `economic_output` (see below) — but nothing reads that stored field for *display* purposes anymore; display always recalculates.
+
 **`Node.advance_year()`** is the per-tile simulation step:
 ```python
-economic_growth_rate = calculate_economic_growth_rate()      # computed fresh from *current* GDP/capita and buildings
+economic_growth_rate = calculate_economic_growth_rate()      # computed fresh from *current* GDP/capita, buildings, extraction sites
 economic_output = max(0.0, economic_output * (1 + economic_growth_rate))
 population = max(0, round(population * (1 + population_growth_rate)))
 update_projected_population_growth_rate()                    # recalculated using the just-updated population/economic_output
 ```
-Growth compounds once per call; it does not know about the calendar, only about how many times it's been invoked. `economic_growth_rate` is computed and applied within the same step — so after `advance_year()` returns, the field reflects the rate that was *just used* to grow this year's `economic_output`, ready to display via `view`, and it'll be recalculated fresh again (from the new state) the next time `advance_year()` runs.
+Growth compounds once per call; it does not know about the calendar, only about how many times it's been invoked. `economic_growth_rate` is computed and applied within the same step, so after `advance_year()` returns, the stored field reflects the rate that was *just used* to grow this year's `economic_output` — a historical record now, since (per above) `view` doesn't actually read it.
 
 ### `Country` ([country.py](country.py))
 
@@ -135,30 +153,29 @@ Growth compounds once per call; it does not know about the calendar, only about 
 | `stability` | `float` | Same — reserved for future use |
 | `economic_output` | `float` | **A cached snapshot**, not a live value — see below |
 | `population` | `int` | Same |
-| `economic_growth_rate` | `float` | Also a cached snapshot — a GDP-weighted aggregate of the country's nodes' own `economic_growth_rate` (which, per above, is itself already an auto-calculated value, not a manual one) |
-| `projected_population_growth_rate` | `float` | Also a cached snapshot — a population-weighted aggregate of the country's nodes' own *projected* population growth (purely informational, like at the node level) |
 | `reserve_divisions` | `list[Division]` | Divisions belonging to this country that aren't assigned to any node |
 
-**Why the cached fields are snapshots, not live properties**: `Country` cannot compute these on its own because it only holds node *IDs* — it needs the actual node data, which only `World` has. So `Country` exposes pure calculation methods that take the node lookup as a parameter:
+Note there's no stored `economic_growth_rate`/`projected_population_growth_rate` field on `Country` — those were removed once every place that displayed them (`projections`, `view-country`) switched to computing live instead (see below). `economic_output`/`population` remain genuinely cached, though, since summing every node is comparatively cheap either way and several commands (`world status`, `country-status`) are fine reading a periodically-refreshed value rather than needing it live on every keystroke.
+
+**Why `economic_output`/`population` are cached snapshots, not live properties**: `Country` cannot compute these on its own because it only holds node *IDs* — it needs the actual node data, which only `World` has. So `Country` exposes pure calculation methods that take the node lookup as a parameter:
 
 ```python
 country.calculate_economic_output(all_nodes: dict[str, Node]) -> float   # sum of owned nodes' economic_output
 country.calculate_population(all_nodes: dict[str, Node]) -> int          # sum of owned nodes' population
-country.calculate_economic_growth_rate(all_nodes) -> float               # GDP-weighted average of owned nodes' economic_growth_rate
-country.calculate_projected_population_growth_rate(all_nodes) -> float   # population-weighted average of owned nodes' projected population growth
+country.calculate_economic_growth_rate(all_nodes) -> float               # GDP-weighted average of owned nodes' (live) economic_growth_rate
+country.calculate_projected_population_growth_rate(all_nodes) -> float   # population-weighted average of owned nodes' (live) projected population growth
 ```
 
-Both rate calculations are weighted (by each node's economic output / population respectively) rather than a plain average, so a country's aggregate growth is actually dominated by its biggest/wealthiest nodes rather than treating a tiny outpost the same as its capital. If the country owns no nodes (or they sum to zero), the calculation returns `0.0` rather than dividing by zero.
+The two rate-calculation methods still exist and are still used — just never cached. `Country.calculate_economic_growth_rate()`/`calculate_projected_population_growth_rate()` call each owned node's own `calculate_*` method directly (not a stored field), so the whole chain from `projections`/`view-country` down to each node is live end to end. Both are weighted (by each node's economic output / population respectively) rather than a plain average, so a country's aggregate growth is actually dominated by its biggest/wealthiest nodes rather than treating a tiny outpost the same as its capital. If the country owns no nodes (or they sum to zero), the calculation returns `0.0` rather than dividing by zero.
 
-...and separate mutating methods that call those and store the result on the country:
+`economic_output`/`population`, in contrast, still use the store-and-refresh pattern:
 
 ```python
 country.update_economic_output(all_nodes)
 country.update_population(all_nodes)
-country.update_growth_rates(all_nodes)  # calls both calculate_economic_growth_rate and calculate_projected_population_growth_rate
 ```
 
-`main.py`'s `refresh_country_stats(world)` calls all three update methods for every country; both `advance_year()` (automatically, once per year, right after advancing every node) and the standalone `forceupdate` command call `refresh_country_stats()`. **This means a country's displayed GDP/population/projected growth (`world status`, `country-status`, `projections`) only reflects reality as of the last `advance-year` or `forceupdate` call** — if you `seteconomy` a node or reassign it to a different country, you'll see stale numbers until one of those two runs. `forceupdate` exists specifically as the escape hatch for this: recalculate now, without also advancing the game year.
+`main.py`'s `refresh_country_stats(world)` calls both for every country; both `advance_year()` (automatically, once per year, right after advancing every node) and the standalone `forceupdate` command call `refresh_country_stats()`. **This means a country's displayed GDP/population (`world status`, `country-status`) only reflects reality as of the last `advance-year` or `forceupdate` call** — if you `seteconomy` a node or reassign it to a different country, you'll see stale GDP/population until one of those two runs. Growth rates (`projections`, `view-country`) don't have this problem since they're always computed fresh.
 
 ## `World` ([main.py](main.py))
 
@@ -168,7 +185,7 @@ The in-memory container for one game session:
 class World:
     nodes: dict[str, Node]        # keyed by Node.id
     countries: dict[str, Country] # keyed by Country.name
-    year: int                     # starts at 0, incremented by advance_year()
+    year: int                     # defaults to 0, or a value passed to `new-world <name> [start_year]`; incremented by advance_year()
     save_path: str | None         # last path used by `open` or `save`, for bare `save`
 ```
 
@@ -208,6 +225,8 @@ A save file is one JSON object:
       "id": "...", "country": "...", "terrain": "HILLS",
       "connected_tiles": ["..."],
       "building_options": [true, false, ...],   // positional, see building_options above
+      "resources": [true, false, false],        // positional, one per ResourceType
+      "extraction_sites": [false, false, true],  // positional, one per ExtractionSiteType
       "economic_output": 550.0, "economic_growth_rate": 0.038,
       "population": 10500, "population_growth_rate": 0.05,
       "projected_population_growth_rate": 0.025,
@@ -229,7 +248,6 @@ A save file is one JSON object:
     "<country_name>": {
       "name": "...", "nodes": ["<node_id>", ...], "government_type": "MONARCHY",
       "treasury": 0.0, "stability": 50.0, "economic_output": 550.0, "population": 10500,
-      "economic_growth_rate": 0.038, "projected_population_growth_rate": 0.025,
       "reserve_divisions": [ /* same division shape as above, "location": null */ ]
     }
   }
@@ -243,7 +261,7 @@ Enums are stored by member **name** (`"HILLS"`, not `1`), so the encoding is sta
 - `save_world(world, path)` — serializes and writes, always overwriting whatever is at `path`.
 - `load_into_world(world, path)` — reads JSON, then `.clear()`s and repopulates `world.nodes` / `world.countries` / `world.year` **in place**, then reseeds the per-country division ID counters (see "Division IDs and names" above). It mutates the object you pass in rather than returning a new one, which is why `cmd_open` can call it on the live `World` and have the running session immediately reflect the loaded file.
 
-Deserialization is intentionally strict for fields that predate save-format evolution: it indexes required dict keys directly (`data["id"]`, etc.) rather than using `.get()` with defaults, so a hand-edited or badly corrupted save file fails loudly with a `KeyError` (caught and reported by `cmd_open`) instead of silently producing a half-populated `Node`. Fields added *after* the format already existed (`name`, `projected_population_growth_rate`, `reserve_divisions`) use `.get()` with sensible defaults instead, specifically so older save files without them still load cleanly. `Country.economic_growth_rate` goes a step further: it also falls back to reading the old, now-removed `projected_economic_growth_rate` key (`data.get("economic_growth_rate", data.get("projected_economic_growth_rate", 0.0))`), so a save file from before the manual/projected economic-rate distinction was collapsed still loads with a sensible value instead of resetting to `0.0`.
+Deserialization is intentionally strict for fields that predate save-format evolution: it indexes required dict keys directly (`data["id"]`, etc.) rather than using `.get()` with defaults, so a hand-edited or badly corrupted save file fails loudly with a `KeyError` (caught and reported by `cmd_open`) instead of silently producing a half-populated `Node`. Fields added *after* the format already existed (`name`, `resources`, `extraction_sites`, `projected_population_growth_rate`, `reserve_divisions`) use `.get()` with sensible defaults instead, specifically so older save files without them still load cleanly — a save from before `ResourceType`/`ExtractionSiteType` existed loads with every resource/extraction-site flag defaulted to `False`. `Country`'s old, now-removed `economic_growth_rate`/`projected_economic_growth_rate`/`projected_population_growth_rate` keys, if present in an older save, are simply ignored on load rather than causing an error — `Country` no longer has fields for them.
 
 ### Save file location
 
@@ -264,10 +282,11 @@ Flat module layout (no `src/` package directory) declared via `[tool.setuptools]
 
 ## Known limitations / things a future contributor should know
 
-- **No migrations for structural changes**: adding/removing/reordering `Enum` members (`BuildingType` especially, due to positional `building_options`) will break existing save files with no warning beyond a `KeyError`/`ValueError` at load time. Purely additive dataclass fields are handled gracefully (see "Deserialization" above), but anything that changes the *meaning* of existing data is not.
-- **Country stats are eventually-consistent, not live**: see the `Country` snapshot explanation above. `world status` / `country-status` / `projections` can lie until the next `advance-year` or `forceupdate`.
+- **No migrations for structural changes**: adding/removing/reordering `Enum` members (`BuildingType`/`ResourceType`/`ExtractionSiteType` especially, due to their positional boolean arrays) will break existing save files with no warning beyond a `KeyError`/`ValueError` at load time. Purely additive dataclass fields are handled gracefully (see "Deserialization" above), but anything that changes the *meaning* of existing data is not.
+- **Country GDP/population are eventually-consistent, not live**: see the `Country` snapshot explanation above. `world status` / `country-status` can lie until the next `advance-year` or `forceupdate`. Growth rates (`projections`, `view-country`) don't have this problem — they're always computed live.
 - **No validation that a country's `nodes` list matches reality**: it's hand-maintained by `cmd_setcountry`; direct field mutation elsewhere would desync it from `Node.country`.
 - **`Division.supply_requirement` and `Country.treasury`/`stability` are inert**: modeled and persisted, but no game logic currently reads or changes them based on gameplay (only player commands set them directly).
+- **Resources aren't tied to terrain or generated procedurally**: `addresource`/`removeresource` set them directly; a `DESERT` node can have `OIL_GAS` if you say so. There's no simulation linking resource placement to terrain type.
 - **No combat**: divisions (including air force ones) can occupy the same node from opposing countries with nothing resolving the conflict.
 - **Single global `World`**: the terminal only ever manages one game at a time in memory; `new-world`/`open` overwrite it rather than switching between multiple loaded worlds.
 - **Division names are only unique per-country, not globally**: this is intentional (two countries can each field a "1st Infantry"), but means a division "name" alone is never a safe global key outside the context of a known country.

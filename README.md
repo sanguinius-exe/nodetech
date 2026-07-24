@@ -34,13 +34,13 @@ Once installed, activate the virtual environment (`source .venv/bin/activate`) a
 
 Start here: create a new world, or load one you already have.
 
-| Command                              | Description                                                            |
-| ------------------------------------ | ---------------------------------------------------------------------- |
-| `new-world <name>`                   | Create a fresh world and save it as `<name>.json`                      |
-| `open <name or path>`                | Load a world from a save file, replacing the current one               |
-| `list-worlds`                        | List all saved worlds                                                  |
-| `rename-world <old_name> <new_name>` | Rename a saved world                                                   |
-| `save [name or path]`                | Save the world to a file; reuses the last opened/saved path if omitted |
+| Command                              | Description                                                                                            |
+| ------------------------------------ | ------------------------------------------------------------------------------------------------------ |
+| `new-world <name> [start_year]`      | Create a fresh world and save it as `<name>.json`, optionally starting at a given year (defaults to 0) |
+| `open <name or path>`                | Load a world from a save file, replacing the current one                                               |
+| `list-worlds`                        | List all saved worlds                                                                                  |
+| `rename-world <old_name> <new_name>` | Rename a saved world                                                                                   |
+| `save [name or path]`                | Save the world to a file; reuses the last opened/saved path if omitted                                 |
 
 Worlds are saved as JSON via [database.py](database.py), which stores every node (including its nested military deployments and divisions) and every country.
 
@@ -52,13 +52,13 @@ Worlds are saved as JSON via [database.py](database.py), which stores every node
 
 Once you have a world loaded, start a country.
 
-| Command                                | Description                                       |
-| -------------------------------------- | ------------------------------------------------- |
-| `create-country <name> [government]`   | Create a new country                              |
-| `view-country <name>`                  | View details of a country                         |
-| `list-countries`                       | List all countries                                |
-| `setgovernment <country> <government>` | Set a country's government type                   |
-| `country-status <country>`             | Show a country's GDP, population, and other stats |
+| Command                                | Description                                                                                              |
+| -------------------------------------- | -------------------------------------------------------------------------------------------------------- |
+| `create-country <name> [government]`   | Create a new country                                                                                     |
+| `view-country <name>`                  | View a country's GDP, population, and growth rates (live, summed from its nodes), and its division count |
+| `list-countries`                       | List all countries                                                                                       |
+| `setgovernment <country> <government>` | Set a country's government type                                                                          |
+| `country-status <country>`             | Show a country's GDP, population, and other stats                                                        |
 
 ### Nodes
 
@@ -77,8 +77,14 @@ Nodes are the map tiles a country controls, and where its economy, population, a
 | `seteconomy <id> <output>`        | Set a node's economic output                                                               |
 | `build <id> <building>`           | Enable a building                                                                          |
 | `unbuild <id> <building>`         | Disable a building                                                                         |
+| `addresource <id> <resource>`     | Add a resource to a node                                                                   |
+| `removeresource <id> <resource>`  | Remove a resource from a node                                                              |
+| `build-extraction <id> <site>`    | Build an extraction site — only allowed if the node has the resource that site requires    |
+| `unbuild-extraction <id> <site>`  | Remove an extraction site                                                                  |
 
-A node's **economic growth rate isn't set manually** — each `advance-year`, it's recalculated automatically from the node's GDP per capita (richer nodes grow slower, poorer nodes faster, within a floor/ceiling) plus a modifier per enabled building. Population growth is still set directly with `setpopgrowth`; a node's *projected* population growth (shown in `view`) is the same kind of automatic forecast, just informational rather than something that drives the simulation.
+A node's **economic growth rate isn't set manually** — it's always calculated live from the node's current GDP per capita (richer nodes grow slower, poorer nodes faster, along an S-curve floor/ceiling) plus a modifier per enabled building, and it updates instantly whenever you check `view` or `projections`, not just on `advance-year`. Population growth is still set directly with `setpopgrowth`; a node's *projected* population growth (shown in `view`) is the same kind of live automatic forecast, just informational rather than something that drives the simulation.
+
+**Resources** (`BASIC_MATERIALS`, `RARE_EARTH_METALS`, `OIL_GAS`) represent what a node has naturally. **Extraction sites** (`BASIC_MATERIALS_MINE`, `RARE_EARTH_MINE`, `OIL_RIG`) are structures you build to exploit a resource — each one requires its matching resource to already be present on the node (`build-extraction` refuses otherwise) — and once built, give a much larger economic growth boost than an ordinary building.
 
 ### Military
 
@@ -97,21 +103,23 @@ Every division has a player-given **name** (must be unique within its own countr
 
 ### World & simulation
 
-| Command           | Description                                                                                              |
-| ----------------- | -------------------------------------------------------------------------------------------------------- |
-| `world status`    | List every country with its GDP and population                                                           |
-| `world divisions` | List every country's divisions (deployed and in reserve), grouped by country                             |
-| `projections`     | List every country's economic growth rate and projected population growth rate                           |
-| `advance-year`    | Advance the game by one year                                                                             |
-| `forceupdate`     | Recalculate every country's GDP, population, and growth rates from its nodes, without advancing the year |
+| Command           | Description                                                                                                                                   |
+| ----------------- | --------------------------------------------------------------------------------------------------------------------------------------------- |
+| `world status`    | List every country with its GDP and population                                                                                                |
+| `world divisions` | List every country's divisions (deployed and in reserve), grouped by country                                                                  |
+| `projections`     | List every country's economic growth rate and projected population growth rate (calculated live)                                              |
+| `advance-year`    | Advance the game by one year                                                                                                                  |
+| `forceupdate`     | Recalculate every country's GDP and population from its nodes, without advancing the year (growth rates are already live and don't need this) |
 
 ### Reference lists
 
 Lookup tables for valid values used by the commands above.
 
-| Command          | Description                     |
-| ---------------- | ------------------------------- |
-| `buildings`      | List available building types   |
-| `terrains`       | List available terrain types    |
-| `division-types` | List available division types   |
-| `governments`    | List available government types |
+| Command            | Description                          |
+| ------------------ | ------------------------------------ |
+| `buildings`        | List available building types        |
+| `resources`        | List available resource types        |
+| `extraction-sites` | List available extraction site types |
+| `terrains`         | List available terrain types         |
+| `division-types`   | List available division types        |
+| `governments`      | List available government types      |
