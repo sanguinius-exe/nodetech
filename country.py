@@ -26,8 +26,6 @@ class Country:
     stability: float = 50.0
     economic_output: float = 0.0
     population: int = 0
-    economic_growth_rate: float = 0.0
-    projected_population_growth_rate: float = 0.0
     reserve_divisions: list[Division] = field(default_factory=list)
 
     def get_name(self) -> str:
@@ -54,12 +52,6 @@ class Country:
     def get_population(self) -> int:
         return self.population
 
-    def get_economic_growth_rate(self) -> float:
-        return self.economic_growth_rate
-
-    def get_projected_population_growth_rate(self) -> float:
-        return self.projected_population_growth_rate
-
     def get_reserve_divisions(self) -> list[Division]:
         return self.reserve_divisions
 
@@ -79,22 +71,30 @@ class Country:
         return sum(all_nodes[node_id].get_population() for node_id in self.nodes if node_id in all_nodes)
 
     def calculate_economic_growth_rate(self, all_nodes: dict[str, Node]) -> float:
+        """Live GDP-weighted average of owned nodes' economic growth rate.
+
+        Each node's rate is recomputed on the spot (not read from a cached
+        field), so this always reflects the current state of every node's
+        population/economic output/buildings, whether or not advance-year
+        has run since they last changed.
+        """
         total_output = self.calculate_economic_output(all_nodes)
         if total_output <= 0:
             return 0.0
         weighted_sum = sum(
-            all_nodes[node_id].get_economic_output() * all_nodes[node_id].get_economic_growth_rate()
+            all_nodes[node_id].get_economic_output() * all_nodes[node_id].calculate_economic_growth_rate()
             for node_id in self.nodes
             if node_id in all_nodes
         )
         return weighted_sum / total_output
 
     def calculate_projected_population_growth_rate(self, all_nodes: dict[str, Node]) -> float:
+        """Live population-weighted average of owned nodes' projected population growth. See calculate_economic_growth_rate."""
         total_population = self.calculate_population(all_nodes)
         if total_population <= 0:
             return 0.0
         weighted_sum = sum(
-            all_nodes[node_id].get_population() * all_nodes[node_id].get_projected_population_growth_rate()
+            all_nodes[node_id].get_population() * all_nodes[node_id].calculate_projected_population_growth_rate()
             for node_id in self.nodes
             if node_id in all_nodes
         )
@@ -105,7 +105,3 @@ class Country:
 
     def update_population(self, all_nodes: dict[str, Node]) -> None:
         self.population = self.calculate_population(all_nodes)
-
-    def update_growth_rates(self, all_nodes: dict[str, Node]) -> None:
-        self.economic_growth_rate = self.calculate_economic_growth_rate(all_nodes)
-        self.projected_population_growth_rate = self.calculate_projected_population_growth_rate(all_nodes)

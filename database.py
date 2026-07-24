@@ -6,7 +6,7 @@ from typing import Any
 
 from country import Country, GovernmentType
 from division import AirForceDivision, Division, DivisionType, seed_division_id_counter
-from node import BuildingType, MilitaryDeployment, Node, Terrain
+from node import BuildingType, ExtractionSiteType, MilitaryDeployment, Node, ResourceType, Terrain
 
 DEFAULT_SAVE_DIR = Path.home() / "proppunk game files"
 
@@ -111,6 +111,8 @@ def _node_to_dict(node: Node) -> dict[str, Any]:
         "terrain": node.terrain.name,
         "connected_tiles": node.connected_tiles,
         "building_options": node.building_options,
+        "resources": node.resources,
+        "extraction_sites": node.extraction_sites,
         "economic_output": node.economic_output,
         "economic_growth_rate": node.economic_growth_rate,
         "population": node.population,
@@ -127,6 +129,8 @@ def _node_from_dict(data: dict[str, Any]) -> Node:
         terrain=Terrain[data["terrain"]],
         connected_tiles=data["connected_tiles"],
         building_options=data["building_options"],
+        resources=data.get("resources", [False] * len(ResourceType)),
+        extraction_sites=data.get("extraction_sites", [False] * len(ExtractionSiteType)),
         economic_output=data["economic_output"],
         economic_growth_rate=data["economic_growth_rate"],
         population=data["population"],
@@ -145,8 +149,6 @@ def _country_to_dict(country: Country) -> dict[str, Any]:
         "stability": country.stability,
         "economic_output": country.economic_output,
         "population": country.population,
-        "economic_growth_rate": country.economic_growth_rate,
-        "projected_population_growth_rate": country.projected_population_growth_rate,
         "reserve_divisions": [_division_to_dict(d) for d in country.reserve_divisions],
     }
 
@@ -160,8 +162,6 @@ def _country_from_dict(data: dict[str, Any]) -> Country:
         stability=data["stability"],
         economic_output=data["economic_output"],
         population=data["population"],
-        economic_growth_rate=data.get("economic_growth_rate", data.get("projected_economic_growth_rate", 0.0)),
-        projected_population_growth_rate=data.get("projected_population_growth_rate", 0.0),
         reserve_divisions=[_division_from_dict(d) for d in data.get("reserve_divisions", [])],
     )
 

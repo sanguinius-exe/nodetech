@@ -6,7 +6,15 @@ from pathlib import Path
 import database
 from country import Country, GovernmentType
 from division import AirForceDivision, Division, DivisionType
-from node import BuildingType, MilitaryDeployment, Node, Terrain
+from node import (
+    EXTRACTION_SITE_RESOURCE_REQUIREMENTS,
+    BuildingType,
+    ExtractionSiteType,
+    MilitaryDeployment,
+    Node,
+    ResourceType,
+    Terrain,
+)
 
 HELP_TEXT = "See README.md for the full list of commands."
 
@@ -55,9 +63,11 @@ def format_node(node: Node) -> str:
         f"  Terrain: {node.get_terrain().name}",
         f"  Connected tiles: {', '.join(node.get_connected_tiles()) or 'none'}",
         f"  Buildings: {', '.join(b.name for b in node.get_available_buildings()) or 'none'}",
-        f"  Economic output: {node.get_economic_output()} (growth {node.get_economic_growth_rate():+.2%})",
+        f"  Resources: {', '.join(r.name for r in node.get_available_resources()) or 'none'}",
+        f"  Extraction sites: {', '.join(s.name for s in node.get_available_extraction_sites()) or 'none'}",
+        f"  Economic output: {node.get_economic_output()} (growth {node.calculate_economic_growth_rate():+.2%})",
         f"  Population: {node.get_population()} (growth {node.get_population_growth_rate():+.2%}, "
-        f"projected {node.get_projected_population_growth_rate():+.2%})",
+        f"projected {node.calculate_projected_population_growth_rate():+.2%})",
         "  Military deployments:",
     ]
     deployments = node.get_military_deployments()
@@ -74,25 +84,29 @@ def format_node(node: Node) -> str:
     return "\n".join(lines)
 
 
-def format_country(country: Country) -> str:
-    lines = [
-        f"Country: {country.get_name()}",
-        f"  Government: {country.get_government_type().name}",
-        f"  Treasury: {country.get_treasury()}",
-        f"  Stability: {country.get_stability()}",
-        f"  Nodes ({country.get_node_count()}): {', '.join(country.get_nodes()) or 'none'}",
-        f"  Reserve divisions ({len(country.get_reserve_divisions())}): "
-        f"{', '.join(d.get_name() for d in country.get_reserve_divisions()) or 'none'}",
-    ]
-    return "\n".join(lines)
-
-
-def get_country_divisions(world: World, country_name: str) -> list[Division]:
+def get_country_divisions(all_nodes: dict[str, Node], country_name: str) -> list[Division]:
     divisions: list[Division] = []
-    for node in world.nodes.values():
+    for node in all_nodes.values():
         for deployment in node.get_deployments_by_country(country_name):
             divisions.extend(deployment.get_divisions())
     return divisions
+
+
+def format_country(country: Country, all_nodes: dict[str, Node]) -> str:
+    reserve_count = len(country.get_reserve_divisions())
+    total_divisions = len(get_country_divisions(all_nodes, country.get_name())) + reserve_count
+    lines = [
+        f"Country: {country.get_name()}",
+        f"  Government: {country.get_government_type().name}",
+        f"  Stability: {country.get_stability()}",
+        f"  GDP: {country.calculate_economic_output(all_nodes):.2f} "
+        f"(growth {country.calculate_economic_growth_rate(all_nodes):+.2%})",
+        f"  Population: {country.calculate_population(all_nodes)} "
+        f"(projected growth {country.calculate_projected_population_growth_rate(all_nodes):+.2%})",
+        f"  Nodes ({country.get_node_count()}): {', '.join(country.get_nodes()) or 'none'}",
+        f"  Divisions: {total_divisions} ({reserve_count} reserve)",
+    ]
+    return "\n".join(lines)
 
 
 def format_division_line(division: Division) -> str:
@@ -207,7 +221,7 @@ def cmd_view_country(world: World, args: list[str]) -> None:
     if country is None:
         print(f"No such country '{args[0]}'.")
         return
-    print(format_country(country))
+    print(format_country(country, world.nodes))
 
 
 def cmd_world_status(world: World) -> None:
@@ -223,7 +237,7 @@ def cmd_world_divisions(world: World) -> None:
         print("No countries yet.")
         return
     for country in world.countries.values():
-        divisions = get_country_divisions(world, country.get_name()) + country.get_reserve_divisions()
+        divisions = get_country_divisions(world.nodes, country.get_name()) + country.get_reserve_divisions()
         print(f"{country.get_name()}:")
         if not divisions:
             print("  none")
@@ -239,8 +253,8 @@ def cmd_projections(world: World) -> None:
     for country in world.countries.values():
         print(
             f"  {country.get_name()}: economic growth "
-            f"{country.get_economic_growth_rate():+.2%}, "
-            f"projected population growth {country.get_projected_population_growth_rate():+.2%}"
+            f"{country.calculate_economic_growth_rate(world.nodes):+.2%}, "
+            f"projected population growth {country.calculate_projected_population_growth_rate(world.nodes):+.2%}"
         )
 
 
@@ -253,7 +267,7 @@ def cmd_country_divisions(world: World, args: list[str]) -> None:
     if country is None:
         print(f"No such country '{country_name}'.")
         return
-    divisions = get_country_divisions(world, country_name) + country.get_reserve_divisions()
+    divisions = get_country_divisions(world.nodes, country_name) + country.get_reserve_divisions()
     if not divisions:
         print(f"'{country_name}' has no divisions.")
         return
@@ -381,8 +395,50 @@ def cmd_build(world: World, args: list[str], enable: bool) -> None:
     print(f"{building.name} {'enabled' if enable else 'disabled'} at '{node_id}'.")
 
 
+def cmd_resource(world: World, args: list[str], enable: bool) -> None:
+    verb = "addresource" if enable else "removeresource"
+    if len(args) != 2:
+        print(f"Usage: {verb} <id> <resource>")
+        return
+    node_id, resource_name = args
+    node = world.get_node(node_id)
+    if node is None:
+        print(f"No such node '{node_id}'.")
+        return
+    try:
+        resource = ResourceType[resource_name.upper()]
+    except KeyError:
+        print(f"Unknown resource '{resource_name}'. Use 'resources' to list options.")
+        return
+    node.resources[resource.value - 1] = enable
+    print(f"{resource.name} {'added to' if enable else 'removed from'} '{node_id}'.")
+
+
+def cmd_extraction(world: World, args: list[str], enable: bool) -> None:
+    verb = "build-extraction" if enable else "unbuild-extraction"
+    if len(args) != 2:
+        print(f"Usage: {verb} <id> <site>")
+        return
+    node_id, site_name = args
+    node = world.get_node(node_id)
+    if node is None:
+        print(f"No such node '{node_id}'.")
+        return
+    try:
+        site = ExtractionSiteType[site_name.upper()]
+    except KeyError:
+        print(f"Unknown extraction site '{site_name}'. Use 'extraction-sites' to list options.")
+        return
+    if enable and not node.can_build_extraction_site(site):
+        required = EXTRACTION_SITE_RESOURCE_REQUIREMENTS[site]
+        print(f"'{node_id}' doesn't have {required.name}, so a {site.name} can't be built there.")
+        return
+    node.extraction_sites[site.value - 1] = enable
+    print(f"{site.name} {'built at' if enable else 'removed from'} '{node_id}'.")
+
+
 def find_division_by_name(world: World, country_name: str, name: str) -> Division | None:
-    for division in get_country_divisions(world, country_name):
+    for division in get_country_divisions(world.nodes, country_name):
         if division.get_name() == name:
             return division
     country = world.get_country(country_name)
@@ -592,7 +648,6 @@ def refresh_country_stats(world: World) -> None:
     for country in world.countries.values():
         country.update_economic_output(world.nodes)
         country.update_population(world.nodes)
-        country.update_growth_rates(world.nodes)
 
 
 def advance_year(world: World) -> None:
@@ -636,20 +691,27 @@ def cmd_save(world: World, args: list[str]) -> None:
 
 
 def cmd_new_world(world: World, args: list[str]) -> None:
-    if len(args) != 1:
-        print("Usage: new-world <name>")
+    if len(args) not in (1, 2):
+        print("Usage: new-world <name> [start_year]")
         return
     name = args[0]
+    start_year = 0
+    if len(args) == 2:
+        try:
+            start_year = int(args[1])
+        except ValueError:
+            print("Start year must be an integer.")
+            return
     path = database.resolve_save_path(name)
     if path.exists():
         print(f"A world named '{name}' already exists at '{path}'. Use 'open {name}' to load it.")
         return
     world.nodes.clear()
     world.countries.clear()
-    world.year = 0
+    world.year = start_year
     world.save_path = str(path)
     database.save_world(world, str(path))
-    print(f"Created new world '{name}' at '{path}'.")
+    print(f"Created new world '{name}' at '{path}' (starting year {start_year}).")
 
 
 def cmd_rename_world(world: World, args: list[str]) -> None:
@@ -723,6 +785,14 @@ def run_command(world: World, raw: str) -> bool:
         cmd_build(world, args, enable=True)
     elif command == "unbuild":
         cmd_build(world, args, enable=False)
+    elif command == "addresource":
+        cmd_resource(world, args, enable=True)
+    elif command == "removeresource":
+        cmd_resource(world, args, enable=False)
+    elif command == "build-extraction":
+        cmd_extraction(world, args, enable=True)
+    elif command == "unbuild-extraction":
+        cmd_extraction(world, args, enable=False)
     elif command == "deploy":
         cmd_deploy(world, args)
     elif command == "create-division":
@@ -735,6 +805,10 @@ def run_command(world: World, raw: str) -> bool:
         cmd_deploy_reserve(world, args)
     elif command == "buildings":
         print(", ".join(b.name for b in BuildingType))
+    elif command == "resources":
+        print(", ".join(r.name for r in ResourceType))
+    elif command == "extraction-sites":
+        print(", ".join(s.name for s in ExtractionSiteType))
     elif command == "terrains":
         print(", ".join(t.name for t in Terrain))
     elif command == "division-types":

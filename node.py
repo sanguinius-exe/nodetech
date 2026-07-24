@@ -28,6 +28,26 @@ class BuildingType(Enum):
     POWER_PLANT = auto()
 
 
+class ResourceType(Enum):
+    BASIC_MATERIALS = auto()  # iron, steel, and other basic materials
+    RARE_EARTH_METALS = auto()
+    OIL_GAS = auto()
+
+
+class ExtractionSiteType(Enum):
+    BASIC_MATERIALS_MINE = auto()
+    RARE_EARTH_MINE = auto()
+    OIL_RIG = auto()
+
+
+# Each extraction site can only be built on a node that already has the matching resource.
+EXTRACTION_SITE_RESOURCE_REQUIREMENTS: dict[ExtractionSiteType, ResourceType] = {
+    ExtractionSiteType.BASIC_MATERIALS_MINE: ResourceType.BASIC_MATERIALS,
+    ExtractionSiteType.RARE_EARTH_MINE: ResourceType.RARE_EARTH_METALS,
+    ExtractionSiteType.OIL_RIG: ResourceType.OIL_GAS,
+}
+
+
 # Growth rates are derived from GDP per capita (economic_output / population): richer nodes
 # grow slower, poorer nodes grow faster, bounded by a floor and a ceiling. Economic growth is
 # recalculated from this every year and drives the simulation directly; population growth is
@@ -72,6 +92,14 @@ POPULATION_GROWTH_BUILDING_MODIFIERS: dict[BuildingType, float] = {
     BuildingType.POWER_PLANT: 0.0,
 }
 
+# Extraction sites are a much bigger economic boon than ordinary buildings (the strongest
+# building modifier above is FACTORY at 0.005) - raw resource exports are a major growth driver.
+ECONOMIC_GROWTH_EXTRACTION_SITE_MODIFIERS: dict[ExtractionSiteType, float] = {
+    ExtractionSiteType.BASIC_MATERIALS_MINE: 0.015,
+    ExtractionSiteType.RARE_EARTH_MINE: 0.025,
+    ExtractionSiteType.OIL_RIG: 0.02,
+}
+
 
 @dataclass
 class MilitaryDeployment:
@@ -92,6 +120,8 @@ class Node:
     terrain: Terrain = Terrain.PLAINS
     connected_tiles: list[str] = field(default_factory=list)
     building_options: list[bool] = field(default_factory=lambda: [False] * len(BuildingType))
+    resources: list[bool] = field(default_factory=lambda: [False] * len(ResourceType))
+    extraction_sites: list[bool] = field(default_factory=lambda: [False] * len(ExtractionSiteType))
     economic_output: float = 0.0
     economic_growth_rate: float = 0.0
     population: int = 0
@@ -122,6 +152,27 @@ class Node:
 
     def get_available_buildings(self) -> list[BuildingType]:
         return [b for b in BuildingType if self.has_building(b)]
+
+    def get_resources(self) -> list[bool]:
+        return self.resources
+
+    def has_resource(self, resource_type: ResourceType) -> bool:
+        return self.resources[resource_type.value - 1]
+
+    def get_available_resources(self) -> list[ResourceType]:
+        return [r for r in ResourceType if self.has_resource(r)]
+
+    def get_extraction_sites(self) -> list[bool]:
+        return self.extraction_sites
+
+    def has_extraction_site(self, site_type: ExtractionSiteType) -> bool:
+        return self.extraction_sites[site_type.value - 1]
+
+    def get_available_extraction_sites(self) -> list[ExtractionSiteType]:
+        return [s for s in ExtractionSiteType if self.has_extraction_site(s)]
+
+    def can_build_extraction_site(self, site_type: ExtractionSiteType) -> bool:
+        return self.has_resource(EXTRACTION_SITE_RESOURCE_REQUIREMENTS[site_type])
 
     def get_economic_output(self) -> float:
         return self.economic_output
@@ -157,6 +208,9 @@ class Node:
             self.get_gdp_per_capita(), ECONOMIC_GROWTH_FLOOR, ECONOMIC_GROWTH_CEILING
         )
         modifier = sum(ECONOMIC_GROWTH_BUILDING_MODIFIERS.get(b, 0.0) for b in self.get_available_buildings())
+        modifier += sum(
+            ECONOMIC_GROWTH_EXTRACTION_SITE_MODIFIERS.get(s, 0.0) for s in self.get_available_extraction_sites()
+        )
         return min(ECONOMIC_GROWTH_CEILING, max(ECONOMIC_GROWTH_FLOOR, base_rate + modifier))
 
     def calculate_projected_population_growth_rate(self) -> float:
