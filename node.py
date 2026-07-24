@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass, field
 from enum import Enum, auto
 
@@ -36,9 +37,18 @@ ECONOMIC_GROWTH_CEILING = 0.05
 POPULATION_GROWTH_FLOOR = 0.005
 POPULATION_GROWTH_CEILING = 0.035
 
-# Calibration constant: the GDP per capita at which the base rate sits exactly halfway
-# between floor and ceiling. Tune this alongside whatever scale economic_output ends up using.
-GDP_PER_CAPITA_SCALE = 0.1
+# The growth curve is an S-curve (logistic) in GDP per capita: nodes below GDP_PER_CAPITA_LOW
+# sit near the ceiling, nodes above GDP_PER_CAPITA_HIGH sit near the floor, and the transition
+# happens smoothly between the two. Tune these alongside whatever scale economic_output ends up using.
+GDP_PER_CAPITA_LOW = 200.0
+GDP_PER_CAPITA_HIGH = 1500.0
+GDP_PER_CAPITA_MIDPOINT = (GDP_PER_CAPITA_LOW + GDP_PER_CAPITA_HIGH) / 2
+GDP_PER_CAPITA_STEEPNESS = (GDP_PER_CAPITA_HIGH - GDP_PER_CAPITA_LOW) / 4
+
+
+def _growth_rate_from_gdp_per_capita(gdp_per_capita: float, floor: float, ceiling: float) -> float:
+    sigmoid = 1.0 / (1.0 + math.exp(-(gdp_per_capita - GDP_PER_CAPITA_MIDPOINT) / GDP_PER_CAPITA_STEEPNESS))
+    return ceiling - (ceiling - floor) * sigmoid
 
 ECONOMIC_GROWTH_BUILDING_MODIFIERS: dict[BuildingType, float] = {
     BuildingType.FARM: 0.001,
@@ -143,14 +153,16 @@ class Node:
         return self.projected_population_growth_rate
 
     def calculate_economic_growth_rate(self) -> float:
-        saturation = self.get_gdp_per_capita() / (self.get_gdp_per_capita() + GDP_PER_CAPITA_SCALE)
-        base_rate = ECONOMIC_GROWTH_CEILING - (ECONOMIC_GROWTH_CEILING - ECONOMIC_GROWTH_FLOOR) * saturation
+        base_rate = _growth_rate_from_gdp_per_capita(
+            self.get_gdp_per_capita(), ECONOMIC_GROWTH_FLOOR, ECONOMIC_GROWTH_CEILING
+        )
         modifier = sum(ECONOMIC_GROWTH_BUILDING_MODIFIERS.get(b, 0.0) for b in self.get_available_buildings())
         return min(ECONOMIC_GROWTH_CEILING, max(ECONOMIC_GROWTH_FLOOR, base_rate + modifier))
 
     def calculate_projected_population_growth_rate(self) -> float:
-        saturation = self.get_gdp_per_capita() / (self.get_gdp_per_capita() + GDP_PER_CAPITA_SCALE)
-        base_rate = POPULATION_GROWTH_CEILING - (POPULATION_GROWTH_CEILING - POPULATION_GROWTH_FLOOR) * saturation
+        base_rate = _growth_rate_from_gdp_per_capita(
+            self.get_gdp_per_capita(), POPULATION_GROWTH_FLOOR, POPULATION_GROWTH_CEILING
+        )
         modifier = sum(POPULATION_GROWTH_BUILDING_MODIFIERS.get(b, 0.0) for b in self.get_available_buildings())
         return min(POPULATION_GROWTH_CEILING, max(POPULATION_GROWTH_FLOOR, base_rate + modifier))
 
