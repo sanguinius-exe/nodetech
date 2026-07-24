@@ -10,11 +10,11 @@ nodetech is a single-process, in-memory text game. Everything lives in one `Worl
 main.py        terminal loop, command parsing/dispatch, World container
 node.py        Node, MilitaryDeployment, Terrain, BuildingType
 country.py     Country, GovernmentType
-division.py    Division, DivisionType
+division.py    Division, AirForceDivision, DivisionType, ID generation
 database.py    JSON (de)serialization, save-file location/naming
 ```
 
-Dependency direction is strictly one-way: `division.py` has no imports from this project; `node.py` imports `division.py`; `country.py` imports `node.py`; `database.py` imports all three model modules; `main.py` imports `database.py` and all three model modules. Nothing imports `main.py`, so there is no circular-import risk anywhere in the graph.
+Dependency direction is strictly one-way: `division.py` has no imports from this project; `node.py` imports `division.py`; `country.py` imports `division.py` and `node.py`; `database.py` imports all three model modules; `main.py` imports `database.py` and all three model modules. Nothing imports `main.py`, so there is no circular-import risk anywhere in the graph.
 
 ## Data model
 
@@ -26,12 +26,51 @@ The smallest unit of military strength.
 
 | Field | Type | Meaning |
 | --- | --- | --- |
-| `id` | `str` | Unique within its `MilitaryDeployment` (`div_1`, `div_2`, ... assigned by `main.py` at deploy time) |
-| `division_type` | `DivisionType` | INFANTRY / ARMOR / ARTILLERY / CAVALRY / AIRBORNE / ENGINEER / LOGISTICS |
+| `id` | `str` | Internal identifier, auto-generated — see "Division IDs and names" below |
+| `name` | `str` | Player-given, and the **primary way divisions are referenced** in commands (must be unique within its own country — see below) |
+| `division_type` | `DivisionType` | INFANTRY / ARMOR / ARTILLERY / CAVALRY / AIRBORNE / ENGINEER / LOGISTICS / AIR_FORCE |
 | `manpower` | `int` | Number of men in the division |
 | `supply_requirement` | `float` | How much supply the division consumes (not yet consumed by any game logic — stored for future use) |
 | `morale` | `float` | Defaults to `100.0` |
-| `location` | `str \| None` | The `Node.id` the division is currently stationed at |
+| `location` | `str \| None` | The `Node.id` the division is currently stationed at, or `None` if it's in a country's reserve |
+
+Divisions are constructed exclusively through `Division.create(...)`, never the raw dataclass constructor directly — this is what guarantees a properly generated `id`.
+
+#### Division IDs and names
+
+There are two distinct identifiers, serving different purposes:
+
+- **`name`** is what the player types and what's shown first in every listing. It's required at creation time and must be unique *within the same country* — `find_division_by_name()` in `main.py` checks both a country's on-map divisions and its reserve before allowing a `deploy`/`create-division`/`create-airforce-division` to proceed. Two different countries can each have a division named `"1st Infantry"` with no conflict, since uniqueness is scoped per country.
+- **`id`** (e.g. `Fedran Republic_div_3`) exists so every division has a globally-safe internal key even if names collide across countries, and is generated automatically — the player never supplies it.
+
+ID generation lives in `division.py` as module-level state, scoped **per country**:
+
+```python
+_id_counters: dict[str, itertools.count] = {}
+
+def next_division_id(country: str) -> str:
+    counter = _id_counters.setdefault(country, itertools.count(1))
+    return f"{country}_div_{next(counter)}"
+```
+
+Each country's counter is independent, so `"Fedran Republic"` and `"Astoria"` both mint IDs starting at `_div_1` without colliding — the country name is baked directly into the ID string. Because this counter is in-process global state (not stored on `World`), it must be **reseeded on load** or a freshly loaded save's next-created division could reuse an ID already present in the file. `database.load_into_world()` handles this by scanning every division in the loaded file (across all nodes' deployments and all countries' reserves), finding the highest `_div_N` suffix per country, and calling `seed_division_id_counter(country, max + 1)` before returning. `new-world`/`create-country` don't need any special handling here since a country with no prior divisions naturally starts its counter at 1 the first time `next_division_id` is called for it.
+
+#### `AirForceDivision` — a real subclass, not a flag
+
+```python
+@dataclass
+class AirForceDivision(Division):
+    aircraft_type: str = ""
+    equipment_rating: float = 0.0
+    aircraft_count: int = 0
+    range: float = 0.0
+```
+
+This is genuine inheritance (`isinstance(division, Division)` is `True` for an `AirForceDivision`), not a `Division` with an `AIR_FORCE` enum tag and unused extra fields. That's deliberate: it means every piece of code that already works with `Division` generically — `MilitaryDeployment.divisions`, `Country.reserve_divisions`, `deploy-reserve`'s name lookup, `country-divisions`, `world divisions`, JSON save/load — handles an `AirForceDivision` with zero special-casing. The only places that *do* know about the subtype are:
+
+- **Creation**: `create-airforce-division`/`deploy-airforce` (their own commands, since the constructor needs 4 extra required arguments that don't fit the generic `create-division`/`deploy` signature). Using the generic commands with `air_force` as the type is explicitly rejected in `cmd_deploy`/`cmd_create_division` with a message pointing at the right command, rather than silently creating an air force division with empty/zero aircraft fields.
+- **Display**: `format_division_extra()` in `main.py` does an `isinstance` check to print the extra aircraft stats as an indented detail line under the division's normal summary line.
+- **Persistence**: `database.py`'s `_division_to_dict`/`_division_from_dict` check `isinstance(division, AirForceDivision)` / `data["division_type"] == "AIR_FORCE"` respectively to include/reconstruct the extra fields.
 
 ### `MilitaryDeployment` ([node.py](node.py))
 
@@ -40,6 +79,10 @@ A grouping of divisions belonging to one country, attached to one `Node`. A sing
 - `country: str` — the deploying country's name (matches `Country.name`, not necessarily the node's owner — a country can deploy divisions onto territory it doesn't control)
 - `divisions: list[Division]`
 - `get_strength()` sums `manpower` across its divisions
+
+### Reserve divisions
+
+A `Division` doesn't have to be on a node. `Country.reserve_divisions: list[Division]` holds divisions that exist (and are fully constructed, with an ID and a name) but aren't assigned anywhere (`location=None`). `create-division`/`create-airforce-division` create directly into this list; `deploy-reserve` (`Country.remove_reserve_division(name)`) pulls one out by name, sets its `location`, and appends it to the appropriate node's `MilitaryDeployment` (creating that deployment if the country doesn't already have one on that node) — the same division object just moves from one list to another, it isn't recreated. `deploy`/`deploy-airforce` skip the reserve entirely and create+place a division on a node in one step.
 
 ### `Node` ([node.py](node.py))
 
@@ -55,15 +98,28 @@ A single map tile — the core unit the whole game is built on.
 | `economic_output` / `economic_growth_rate` | `float` | Current output and its annual compounding rate |
 | `population` / `population_growth_rate` | `int` / `float` | Current population and its annual compounding rate |
 | `military_deployments` | `list[MilitaryDeployment]` | All deployments currently on this tile, from any country |
+| `projected_economic_growth_rate` / `projected_population_growth_rate` | `float` | Simulation-derived forecast — see below. Distinct from the manually-set `*_growth_rate` fields above, which are what `advance_year()` actually applies |
 
 **`building_options` indexing**: this is a parallel boolean array, not a set of building names. `BuildingType` is an `Enum` using `auto()`, so members are numbered 1..N in declaration order (`FARM=1, MINE=2, ...`). `Node.has_building(bt)` reads `building_options[bt.value - 1]`; `main.py`'s `build`/`unbuild` commands write to that same index. If `BuildingType` gains or loses a member, every existing `building_options` list (including ones in save files) shifts out of alignment — see "Known limitations" below.
+
+#### Projected growth rates
+
+`Node.calculate_projected_economic_growth_rate()`/`calculate_projected_population_growth_rate()` forecast a growth rate from the node's current GDP per capita (`economic_output / population`, or `0.0` if `population <= 0`), independent of whatever the player manually set `economic_growth_rate`/`population_growth_rate` to. The model: richer nodes grow slower, poorer nodes grow faster, bounded by a floor and ceiling —
+
+```python
+saturation = gdp_per_capita / (gdp_per_capita + GDP_PER_CAPITA_SCALE)
+base_rate = ceiling - (ceiling - floor) * saturation
+```
+
+`GDP_PER_CAPITA_SCALE` (`0.1`) is a calibration constant — the GDP/capita at which the curve sits exactly halfway between floor and ceiling — flagged as tunable since the game has no fixed definition of what a unit of `economic_output` represents. Economic growth is bounded `[1.5%, 5%]`; population growth `[0.5%, 3.5%]` (narrower, since population is assumed to respond less elastically to wealth than output does). Each building the node has enabled then nudges the rate up or down via a flat per-building modifier (`ECONOMIC_GROWTH_BUILDING_MODIFIERS`/`POPULATION_GROWTH_BUILDING_MODIFIERS`, e.g. `FACTORY` boosts economic growth but slightly dampens population growth), and the result is re-clamped into the floor/ceiling range so a stack of modifiers can't push a node's forecast outside the intended band.
 
 **`Node.advance_year()`** is the per-tile simulation step:
 ```python
 population = max(0, round(population * (1 + population_growth_rate)))
 economic_output = max(0.0, economic_output * (1 + economic_growth_rate))
+update_projected_growth_rates()  # recalculates using the just-updated population/economic_output
 ```
-Growth compounds once per call; it does not know about the calendar, only about how many times it's been invoked.
+Growth compounds once per call; it does not know about the calendar, only about how many times it's been invoked. Note the *manually set* rate is what actually grows the node — the *projected* rate is purely informational (a forecast for the player), recalculated last using this year's fresh numbers.
 
 ### `Country` ([country.py](country.py))
 
@@ -76,22 +132,29 @@ Growth compounds once per call; it does not know about the calendar, only about 
 | `stability` | `float` | Same — reserved for future use |
 | `economic_output` | `float` | **A cached snapshot**, not a live value — see below |
 | `population` | `int` | Same |
+| `projected_economic_growth_rate` / `projected_population_growth_rate` | `float` | Also cached snapshots — a weighted aggregate of the country's nodes' own projected rates, see below |
+| `reserve_divisions` | `list[Division]` | Divisions belonging to this country that aren't assigned to any node |
 
-**Why `economic_output`/`population` are snapshots, not live properties**: `Country` cannot compute these on its own because it only holds node *IDs* — it needs the actual node data, which only `World` has. So `Country` exposes pure calculation methods that take the node lookup as a parameter:
+**Why the cached fields are snapshots, not live properties**: `Country` cannot compute these on its own because it only holds node *IDs* — it needs the actual node data, which only `World` has. So `Country` exposes pure calculation methods that take the node lookup as a parameter:
 
 ```python
 country.calculate_economic_output(all_nodes: dict[str, Node]) -> float   # sum of owned nodes' economic_output
 country.calculate_population(all_nodes: dict[str, Node]) -> int          # sum of owned nodes' population
+country.calculate_projected_economic_growth_rate(all_nodes) -> float     # GDP-weighted average of owned nodes' projected rate
+country.calculate_projected_population_growth_rate(all_nodes) -> float   # population-weighted average of owned nodes' projected rate
 ```
+
+The two projected-rate calculations are weighted (by each node's economic output / population respectively) rather than a plain average, so a country's aggregate growth forecast is actually dominated by its biggest/wealthiest nodes rather than treating a tiny outpost the same as its capital. If the country owns no nodes (or they sum to zero), the calculation returns `0.0` rather than dividing by zero.
 
 ...and separate mutating methods that call those and store the result on the country:
 
 ```python
-country.update_economic_output(all_nodes)   # self.economic_output = self.calculate_economic_output(all_nodes)
+country.update_economic_output(all_nodes)
 country.update_population(all_nodes)
+country.update_projected_growth_rates(all_nodes)  # calls both calculate_projected_* methods above
 ```
 
-`main.py`'s `advance_year()` calls `update_economic_output`/`update_population` for every country, once per year, right after advancing every node. **This means a country's displayed GDP/population (`world status`, `country-status`) only reflects reality as of the last `advance-year` call** — if you `seteconomy` a node or reassign it to a different country and immediately check `country-status`, you'll see stale numbers until the next `advance-year`.
+`main.py`'s `refresh_country_stats(world)` calls all three update methods for every country; both `advance_year()` (automatically, once per year, right after advancing every node) and the standalone `forceupdate` command call `refresh_country_stats()`. **This means a country's displayed GDP/population/projected growth (`world status`, `country-status`, `projections`) only reflects reality as of the last `advance-year` or `forceupdate` call** — if you `seteconomy` a node or reassign it to a different country, you'll see stale numbers until one of those two runs. `forceupdate` exists specifically as the escape hatch for this: recalculate now, without also advancing the game year.
 
 ## `World` ([main.py](main.py))
 
@@ -123,7 +186,7 @@ There is no automatic consistency check elsewhere — if code ever mutates `node
 
 `run_command(world, raw)` is a single long `if/elif` chain keyed on the first whitespace-separated token (parsed with `shlex.split`, so quoted multi-word arguments like `"Fedran Republic"` work). Each branch either handles trivial cases inline (`buildings`, `terrains`, `division-types`, `governments`, `list`, `list-countries`) or delegates to a `cmd_*` function that does its own argument-count validation and prints a `Usage: ...` line on mismatch. There is no shared argparse-style layer — every command hand-rolls its own validation, so error messages and behavior on bad input are consistent by convention, not by shared code.
 
-`world status` is the one multi-word command: it's dispatched by matching `command == "world"` and then checking `args[0] == "status"`, rather than being registered as its own token.
+`world status` and `world divisions` are the two multi-word commands: both dispatched by matching `command == "world"` and then checking `args[0]`, rather than being registered as their own tokens.
 
 The loop itself (`main()`) is a trivial `input()` → `run_command()` → repeat cycle; `run_command` returns `False` on `quit`/`exit` to end it. `EOFError`/`KeyboardInterrupt` on `input()` also end the loop gracefully.
 
@@ -143,12 +206,16 @@ A save file is one JSON object:
       "building_options": [true, false, ...],   // positional, see building_options above
       "economic_output": 550.0, "economic_growth_rate": 0.1,
       "population": 10500, "population_growth_rate": 0.05,
+      "projected_economic_growth_rate": 0.038, "projected_population_growth_rate": 0.025,
       "military_deployments": [
         {
           "country": "...",
           "divisions": [
-            {"id": "div_1", "division_type": "INFANTRY", "manpower": 5000,
-             "supply_requirement": 12.5, "morale": 100.0, "location": "<node_id>"}
+            {"id": "Fedran Republic_div_1", "name": "1st Infantry", "division_type": "INFANTRY",
+             "manpower": 5000, "supply_requirement": 12.5, "morale": 100.0, "location": "<node_id>"},
+            {"id": "Fedran Republic_div_2", "name": "1st Air Wing", "division_type": "AIR_FORCE",
+             "manpower": 400, "supply_requirement": 18.0, "morale": 100.0, "location": "<node_id>",
+             "aircraft_type": "F-16", "equipment_rating": 8.5, "aircraft_count": 24, "range": 1200.0}
           ]
         }
       ]
@@ -157,20 +224,22 @@ A save file is one JSON object:
   "countries": {
     "<country_name>": {
       "name": "...", "nodes": ["<node_id>", ...], "government_type": "MONARCHY",
-      "treasury": 0.0, "stability": 50.0, "economic_output": 550.0, "population": 10500
+      "treasury": 0.0, "stability": 50.0, "economic_output": 550.0, "population": 10500,
+      "projected_economic_growth_rate": 0.038, "projected_population_growth_rate": 0.025,
+      "reserve_divisions": [ /* same division shape as above, "location": null */ ]
     }
   }
 }
 ```
 
-Enums are stored by member **name** (`"HILLS"`, not `1`), so the encoding is stable across reordering `auto()` values in the enum definitions — but renaming an enum member breaks old save files (there's no migration layer).
+Enums are stored by member **name** (`"HILLS"`, not `1`), so the encoding is stable across reordering `auto()` values in the enum definitions — but renaming an enum member breaks old save files (there's no migration layer). A division's extra `aircraft_*`/`range` keys are only present when `division_type` is `"AIR_FORCE"`; `_division_from_dict` branches on that field to decide whether to construct a plain `Division` or an `AirForceDivision`.
 
 `database.py` has no knowledge of `World` — its functions are written against duck-typed objects with `.nodes`, `.countries`, `.year` attributes (matching dicts of the right shapes), specifically so it doesn't need to import `main.py` and create a cycle:
 
 - `save_world(world, path)` — serializes and writes, always overwriting whatever is at `path`.
-- `load_into_world(world, path)` — reads JSON, then `.clear()`s and repopulates `world.nodes` / `world.countries` / `world.year` **in place**. It mutates the object you pass in rather than returning a new one, which is why `cmd_open` can call it on the live `World` and have the running session immediately reflect the loaded file.
+- `load_into_world(world, path)` — reads JSON, then `.clear()`s and repopulates `world.nodes` / `world.countries` / `world.year` **in place**, then reseeds the per-country division ID counters (see "Division IDs and names" above). It mutates the object you pass in rather than returning a new one, which is why `cmd_open` can call it on the live `World` and have the running session immediately reflect the loaded file.
 
-Deserialization is intentionally strict: it indexes required dict keys directly (`data["id"]`, etc.) rather than using `.get()` with defaults, so a hand-edited or corrupted save file fails loudly with a `KeyError` (caught and reported by `cmd_open`) instead of silently producing a half-populated `Node`.
+Deserialization is intentionally strict for fields that predate save-format evolution: it indexes required dict keys directly (`data["id"]`, etc.) rather than using `.get()` with defaults, so a hand-edited or badly corrupted save file fails loudly with a `KeyError` (caught and reported by `cmd_open`) instead of silently producing a half-populated `Node`. Fields added *after* the format already existed (`name`, `projected_*_growth_rate`, `reserve_divisions`) use `.get()` with sensible defaults instead, specifically so older save files without them still load cleanly.
 
 ### Save file location
 
@@ -191,8 +260,10 @@ Flat module layout (no `src/` package directory) declared via `[tool.setuptools]
 
 ## Known limitations / things a future contributor should know
 
-- **No migrations**: adding/removing/reordering `Enum` members (`BuildingType` especially, due to positional `building_options`) or dataclass fields will break existing save files with no warning beyond a `KeyError`/`ValueError` at load time.
-- **Country stats are eventually-consistent, not live**: see the `Country.economic_output`/`population` explanation above. `world status` / `country-status` can lie until the next `advance-year`.
+- **No migrations for structural changes**: adding/removing/reordering `Enum` members (`BuildingType` especially, due to positional `building_options`) will break existing save files with no warning beyond a `KeyError`/`ValueError` at load time. Purely additive dataclass fields are handled gracefully (see "Deserialization" above), but anything that changes the *meaning* of existing data is not.
+- **Country stats are eventually-consistent, not live**: see the `Country` snapshot explanation above. `world status` / `country-status` / `projections` can lie until the next `advance-year` or `forceupdate`.
 - **No validation that a country's `nodes` list matches reality**: it's hand-maintained by `cmd_setcountry`; direct field mutation elsewhere would desync it from `Node.country`.
 - **`Division.supply_requirement` and `Country.treasury`/`stability` are inert**: modeled and persisted, but no game logic currently reads or changes them based on gameplay (only player commands set them directly).
+- **No combat**: divisions (including air force ones) can occupy the same node from opposing countries with nothing resolving the conflict.
 - **Single global `World`**: the terminal only ever manages one game at a time in memory; `new-world`/`open` overwrite it rather than switching between multiple loaded worlds.
+- **Division names are only unique per-country, not globally**: this is intentional (two countries can each field a "1st Infantry"), but means a division "name" alone is never a safe global key outside the context of a known country.
