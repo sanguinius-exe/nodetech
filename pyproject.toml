@@ -1,0 +1,15 @@
+[project]
+name = "nodetech"
+version = "0.1.0"
+description = "node technology for proppunk [proof of concept]"
+requires-python = ">=3.9"
+
+[project.scripts]
+nodetech = "main:main"
+
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools]
+py-modules = ["main", "node", "country", "division", "database"]
