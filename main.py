@@ -55,8 +55,7 @@ def format_node(node: Node) -> str:
         f"  Terrain: {node.get_terrain().name}",
         f"  Connected tiles: {', '.join(node.get_connected_tiles()) or 'none'}",
         f"  Buildings: {', '.join(b.name for b in node.get_available_buildings()) or 'none'}",
-        f"  Economic output: {node.get_economic_output()} (growth {node.get_economic_growth_rate():+.2%}, "
-        f"projected {node.get_projected_economic_growth_rate():+.2%})",
+        f"  Economic output: {node.get_economic_output()} (growth {node.get_economic_growth_rate():+.2%})",
         f"  Population: {node.get_population()} (growth {node.get_population_growth_rate():+.2%}, "
         f"projected {node.get_projected_population_growth_rate():+.2%})",
         "  Military deployments:",
@@ -239,8 +238,8 @@ def cmd_projections(world: World) -> None:
         return
     for country in world.countries.values():
         print(
-            f"  {country.get_name()}: projected economic growth "
-            f"{country.get_projected_economic_growth_rate():+.2%}, "
+            f"  {country.get_name()}: economic growth "
+            f"{country.get_economic_growth_rate():+.2%}, "
             f"projected population growth {country.get_projected_population_growth_rate():+.2%}"
         )
 
@@ -343,24 +342,6 @@ def cmd_seteconomy(world: World, args: list[str]) -> None:
         return
     node.economic_output = output
     print(f"Node '{node_id}' economic output set to {output}.")
-
-
-def cmd_seteconomygrowth(world: World, args: list[str]) -> None:
-    if len(args) != 2:
-        print("Usage: seteconomygrowth <id> <rate>")
-        return
-    node_id, rate_str = args
-    node = world.get_node(node_id)
-    if node is None:
-        print(f"No such node '{node_id}'.")
-        return
-    try:
-        rate = float(rate_str)
-    except ValueError:
-        print("Growth rate must be a number (e.g. 0.05 for 5%).")
-        return
-    node.economic_growth_rate = rate
-    print(f"Node '{node_id}' economic growth rate set to {rate:+.2%}.")
 
 
 def cmd_setterrain(world: World, args: list[str]) -> None:
@@ -611,7 +592,7 @@ def refresh_country_stats(world: World) -> None:
     for country in world.countries.values():
         country.update_economic_output(world.nodes)
         country.update_population(world.nodes)
-        country.update_projected_growth_rates(world.nodes)
+        country.update_growth_rates(world.nodes)
 
 
 def advance_year(world: World) -> None:
@@ -738,8 +719,6 @@ def run_command(world: World, raw: str) -> bool:
         cmd_setpopgrowth(world, args)
     elif command == "seteconomy":
         cmd_seteconomy(world, args)
-    elif command == "seteconomygrowth":
-        cmd_seteconomygrowth(world, args)
     elif command == "build":
         cmd_build(world, args, enable=True)
     elif command == "unbuild":

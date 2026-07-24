@@ -26,7 +26,7 @@ class Country:
     stability: float = 50.0
     economic_output: float = 0.0
     population: int = 0
-    projected_economic_growth_rate: float = 0.0
+    economic_growth_rate: float = 0.0
     projected_population_growth_rate: float = 0.0
     reserve_divisions: list[Division] = field(default_factory=list)
 
@@ -54,8 +54,8 @@ class Country:
     def get_population(self) -> int:
         return self.population
 
-    def get_projected_economic_growth_rate(self) -> float:
-        return self.projected_economic_growth_rate
+    def get_economic_growth_rate(self) -> float:
+        return self.economic_growth_rate
 
     def get_projected_population_growth_rate(self) -> float:
         return self.projected_population_growth_rate
@@ -78,12 +78,12 @@ class Country:
     def calculate_population(self, all_nodes: dict[str, Node]) -> int:
         return sum(all_nodes[node_id].get_population() for node_id in self.nodes if node_id in all_nodes)
 
-    def calculate_projected_economic_growth_rate(self, all_nodes: dict[str, Node]) -> float:
+    def calculate_economic_growth_rate(self, all_nodes: dict[str, Node]) -> float:
         total_output = self.calculate_economic_output(all_nodes)
         if total_output <= 0:
             return 0.0
         weighted_sum = sum(
-            all_nodes[node_id].get_economic_output() * all_nodes[node_id].get_projected_economic_growth_rate()
+            all_nodes[node_id].get_economic_output() * all_nodes[node_id].get_economic_growth_rate()
             for node_id in self.nodes
             if node_id in all_nodes
         )
@@ -106,6 +106,6 @@ class Country:
     def update_population(self, all_nodes: dict[str, Node]) -> None:
         self.population = self.calculate_population(all_nodes)
 
-    def update_projected_growth_rates(self, all_nodes: dict[str, Node]) -> None:
-        self.projected_economic_growth_rate = self.calculate_projected_economic_growth_rate(all_nodes)
+    def update_growth_rates(self, all_nodes: dict[str, Node]) -> None:
+        self.economic_growth_rate = self.calculate_economic_growth_rate(all_nodes)
         self.projected_population_growth_rate = self.calculate_projected_population_growth_rate(all_nodes)

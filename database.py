@@ -116,7 +116,6 @@ def _node_to_dict(node: Node) -> dict[str, Any]:
         "population": node.population,
         "population_growth_rate": node.population_growth_rate,
         "military_deployments": [_deployment_to_dict(d) for d in node.military_deployments],
-        "projected_economic_growth_rate": node.projected_economic_growth_rate,
         "projected_population_growth_rate": node.projected_population_growth_rate,
     }
 
@@ -133,7 +132,6 @@ def _node_from_dict(data: dict[str, Any]) -> Node:
         population=data["population"],
         population_growth_rate=data["population_growth_rate"],
         military_deployments=[_deployment_from_dict(d) for d in data["military_deployments"]],
-        projected_economic_growth_rate=data.get("projected_economic_growth_rate", 0.0),
         projected_population_growth_rate=data.get("projected_population_growth_rate", 0.0),
     )
 
@@ -147,7 +145,7 @@ def _country_to_dict(country: Country) -> dict[str, Any]:
         "stability": country.stability,
         "economic_output": country.economic_output,
         "population": country.population,
-        "projected_economic_growth_rate": country.projected_economic_growth_rate,
+        "economic_growth_rate": country.economic_growth_rate,
         "projected_population_growth_rate": country.projected_population_growth_rate,
         "reserve_divisions": [_division_to_dict(d) for d in country.reserve_divisions],
     }
@@ -162,7 +160,7 @@ def _country_from_dict(data: dict[str, Any]) -> Country:
         stability=data["stability"],
         economic_output=data["economic_output"],
         population=data["population"],
-        projected_economic_growth_rate=data.get("projected_economic_growth_rate", 0.0),
+        economic_growth_rate=data.get("economic_growth_rate", data.get("projected_economic_growth_rate", 0.0)),
         projected_population_growth_rate=data.get("projected_population_growth_rate", 0.0),
         reserve_divisions=[_division_from_dict(d) for d in data.get("reserve_divisions", [])],
     )

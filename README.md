@@ -64,20 +64,21 @@ Once you have a world loaded, start a country.
 
 Nodes are the map tiles a country controls, and where its economy, population, and military live.
 
-| Command                           | Description                                                  |
-| --------------------------------- | ------------------------------------------------------------ |
-| `create <id>`                     | Create a new node                                            |
-| `list`                            | List all nodes                                               |
-| `view <id>`                       | View details of a node, including its projected growth rates |
-| `connect <id1> <id2>`             | Connect two nodes                                            |
-| `setcountry <id> <country>`       | Set a node's controlling country                             |
-| `setterrain <id> <terrain>`       | Set terrain type                                             |
-| `setpopulation <id> <population>` | Set a node's population                                      |
-| `setpopgrowth <id> <rate>`        | Set a node's population growth rate                          |
-| `seteconomy <id> <output>`        | Set a node's economic output                                 |
-| `seteconomygrowth <id> <rate>`    | Set a node's economic growth rate                            |
-| `build <id> <building>`           | Enable a building                                            |
-| `unbuild <id> <building>`         | Disable a building                                           |
+| Command                           | Description                                                                                |
+| --------------------------------- | ------------------------------------------------------------------------------------------ |
+| `create <id>`                     | Create a new node                                                                          |
+| `list`                            | List all nodes                                                                             |
+| `view <id>`                       | View details of a node, including its economic growth rate and projected population growth |
+| `connect <id1> <id2>`             | Connect two nodes                                                                          |
+| `setcountry <id> <country>`       | Set a node's controlling country                                                           |
+| `setterrain <id> <terrain>`       | Set terrain type                                                                           |
+| `setpopulation <id> <population>` | Set a node's population                                                                    |
+| `setpopgrowth <id> <rate>`        | Set a node's population growth rate                                                        |
+| `seteconomy <id> <output>`        | Set a node's economic output                                                               |
+| `build <id> <building>`           | Enable a building                                                                          |
+| `unbuild <id> <building>`         | Disable a building                                                                         |
+
+A node's **economic growth rate isn't set manually** — each `advance-year`, it's recalculated automatically from the node's GDP per capita (richer nodes grow slower, poorer nodes faster, within a floor/ceiling) plus a modifier per enabled building. Population growth is still set directly with `setpopgrowth`; a node's *projected* population growth (shown in `view`) is the same kind of automatic forecast, just informational rather than something that drives the simulation.
 
 ### Military
 
@@ -96,13 +97,13 @@ Every division has a player-given **name** (must be unique within its own countr
 
 ### World & simulation
 
-| Command           | Description                                                                                                        |
-| ----------------- | ------------------------------------------------------------------------------------------------------------------ |
-| `world status`    | List every country with its GDP and population                                                                     |
-| `world divisions` | List every country's divisions (deployed and in reserve), grouped by country                                       |
-| `projections`     | List every country's projected economic and population growth rates                                                |
-| `advance-year`    | Advance the game by one year                                                                                       |
-| `forceupdate`     | Recalculate every country's GDP, population, and projected growth rates from its nodes, without advancing the year |
+| Command           | Description                                                                                              |
+| ----------------- | -------------------------------------------------------------------------------------------------------- |
+| `world status`    | List every country with its GDP and population                                                           |
+| `world divisions` | List every country's divisions (deployed and in reserve), grouped by country                             |
+| `projections`     | List every country's economic growth rate and projected population growth rate                           |
+| `advance-year`    | Advance the game by one year                                                                             |
+| `forceupdate`     | Recalculate every country's GDP, population, and growth rates from its nodes, without advancing the year |
 
 ### Reference lists
 
