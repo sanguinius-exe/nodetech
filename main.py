@@ -277,28 +277,57 @@ def cmd_create(world: World, args: list[str]) -> None:
     print(f"Created node '{node_id}' at ({x}, {y}).")
 
 
+ANSI_MAP_COLORS = [
+    "\033[31m",  # red
+    "\033[32m",  # green
+    "\033[33m",  # yellow
+    "\033[34m",  # blue
+    "\033[35m",  # magenta
+    "\033[36m",  # cyan
+    "\033[91m",  # bright red
+    "\033[92m",  # bright green
+    "\033[93m",  # bright yellow
+    "\033[94m",  # bright blue
+    "\033[95m",  # bright magenta
+    "\033[96m",  # bright cyan
+]
+ANSI_RESET = "\033[0m"
+
+
+def assign_country_colors(world: World) -> dict[str, str]:
+    return {name: ANSI_MAP_COLORS[i % len(ANSI_MAP_COLORS)] for i, name in enumerate(world.countries)}
+
+
 def cmd_map(world: World) -> None:
     if not world.nodes:
         print("No nodes yet.")
         return
 
     grid: dict[tuple[int, int], Node] = {(n.x, n.y): n for n in world.nodes.values()}
+    country_colors = assign_country_colors(world)
     cell_width = max(2, len(str(max(world.width, world.height) - 1)))
     row_label_width = cell_width + 1
+
+    def colorize(text: str, country: str | None) -> str:
+        color = country_colors.get(country) if country else None
+        return f"{color}{text}{ANSI_RESET}" if color else text
 
     header = " " * (row_label_width + 1) + " ".join(f"{x:>{cell_width}}" for x in range(world.width))
     print(header)
     for y in range(world.height):
-        row = " ".join(
-            f"{(grid[(x, y)].id[0].upper() if (x, y) in grid else '.'):>{cell_width}}" for x in range(world.width)
-        )
-        print(f"{y:>{row_label_width}} {row}")
+        cells = []
+        for x in range(world.width):
+            node = grid.get((x, y))
+            symbol = f"{(node.id[0].upper() if node else '.'):>{cell_width}}"
+            cells.append(colorize(symbol, node.country) if node else symbol)
+        print(f"{y:>{row_label_width}} {' '.join(cells)}")
 
     print()
     print("Legend:")
     for node in sorted(world.nodes.values(), key=lambda n: (n.y, n.x)):
+        letter = colorize(node.id[0].upper(), node.country)
         print(
-            f"  {node.id[0].upper()} = {node.id} ({node.x}, {node.y}) - "
+            f"  {letter} = {node.id} ({node.x}, {node.y}) - "
             f"{node.country or 'unclaimed'}, {node.terrain.name}"
         )
 
