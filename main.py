@@ -3,6 +3,11 @@ from __future__ import annotations
 import shlex
 from pathlib import Path
 
+try:
+    import readline
+except ImportError:
+    readline = None  # not available on this platform; tab-completion is simply skipped
+
 import database
 from country import Country, GovernmentType
 from division import AirForceDivision, Division, DivisionType
@@ -18,19 +23,118 @@ from node import (
 
 HELP_TEXT = "See README.md for the full list of commands."
 
+COMMAND_NAMES = sorted(
+    [
+        "quit",
+        "exit",
+        "help",
+        "list",
+        "map",
+        "create",
+        "view",
+        "connect",
+        "disconnect",
+        "setcountry",
+        "setterrain",
+        "setpopulation",
+        "setpopgrowth",
+        "seteconomy",
+        "build",
+        "unbuild",
+        "addresource",
+        "removeresource",
+        "build-extraction",
+        "unbuild-extraction",
+        "deploy",
+        "create-division",
+        "create-airforce-division",
+        "deploy-airforce",
+        "deploy-reserve",
+        "buildings",
+        "resources",
+        "extraction-sites",
+        "terrains",
+        "division-types",
+        "create-country",
+        "view-country",
+        "list-countries",
+        "setgovernment",
+        "governments",
+        "advance-year",
+        "year",
+        "forceupdate",
+        "world",
+        "projections",
+        "country-divisions",
+        "country-status",
+        "open",
+        "save",
+        "new-world",
+        "rename-world",
+        "list-worlds",
+    ]
+)
+
+# For each command, what kind of value is expected at each argument position (0-indexed,
+# after the command itself). "node" / "country" / "world_name" are resolved dynamically
+# against the live World (or saved worlds on disk); a list is a fixed vocabulary; missing
+# positions (including free-text ones like names/numbers) get no suggestions.
+ARG_COMPLETIONS: dict[str, list[str | list[str]]] = {
+    "view": ["node"],
+    "connect": ["node", "node"],
+    "disconnect": ["node", "node"],
+    "setcountry": ["node", "country"],
+    "setterrain": ["node", [t.name.lower() for t in Terrain]],
+    "setpopulation": ["node"],
+    "setpopgrowth": ["node"],
+    "seteconomy": ["node"],
+    "build": ["node", [b.name.lower() for b in BuildingType]],
+    "unbuild": ["node", [b.name.lower() for b in BuildingType]],
+    "addresource": ["node", [r.name.lower() for r in ResourceType]],
+    "removeresource": ["node", [r.name.lower() for r in ResourceType]],
+    "build-extraction": ["node", [s.name.lower() for s in ExtractionSiteType]],
+    "unbuild-extraction": ["node", [s.name.lower() for s in ExtractionSiteType]],
+    "deploy": ["node", "country", [], [d.name.lower() for d in DivisionType]],
+    "create-division": ["country", [], [d.name.lower() for d in DivisionType]],
+    "create-airforce-division": ["country"],
+    "deploy-airforce": ["node", "country"],
+    "deploy-reserve": ["country", [], "node"],
+    "create-country": [[], [g.name.lower() for g in GovernmentType]],
+    "view-country": ["country"],
+    "setgovernment": ["country", [g.name.lower() for g in GovernmentType]],
+    "country-divisions": ["country"],
+    "country-status": ["country"],
+    "world": [["status", "divisions"]],
+    "open": ["world_name"],
+    "save": ["world_name"],
+    "rename-world": ["world_name"],
+}
+
+
+DEFAULT_GRID_SIZE = 10
+
 
 class World:
     def __init__(self) -> None:
         self.nodes: dict[str, Node] = {}
         self.countries: dict[str, Country] = {}
         self.year: int = 0
+        self.start_year: int = 0
         self.save_path: str | None = None
+        self.width: int = DEFAULT_GRID_SIZE
+        self.height: int = DEFAULT_GRID_SIZE
 
     def add_node(self, node: Node) -> None:
         self.nodes[node.id] = node
 
     def get_node(self, node_id: str) -> Node | None:
         return self.nodes.get(node_id)
+
+    def get_node_at(self, x: int, y: int) -> Node | None:
+        for node in self.nodes.values():
+            if node.x == x and node.y == y:
+                return node
+        return None
 
     def add_country(self, country: Country) -> None:
         self.countries[country.name] = country
@@ -59,6 +163,7 @@ def format_division_extra(division: Division) -> str | None:
 def format_node(node: Node) -> str:
     lines = [
         f"Node: {node.get_id()}",
+        f"  Position: ({node.get_x()}, {node.get_y()})",
         f"  Country: {node.get_country() or 'unclaimed'}",
         f"  Terrain: {node.get_terrain().name}",
         f"  Connected tiles: {', '.join(node.get_connected_tiles()) or 'none'}",
@@ -131,16 +236,71 @@ def format_country_status(country: Country) -> str:
     return "\n".join(lines)
 
 
+def connect_nodes(n1: Node, n2: Node) -> None:
+    if n2.id not in n1.connected_tiles:
+        n1.connected_tiles.append(n2.id)
+    if n1.id not in n2.connected_tiles:
+        n2.connected_tiles.append(n1.id)
+
+
+def auto_connect_grid_neighbors(world: World, node: Node) -> None:
+    for dx, dy in ((1, 0), (-1, 0), (0, 1), (0, -1)):
+        neighbor = world.get_node_at(node.x + dx, node.y + dy)
+        if neighbor is not None:
+            connect_nodes(node, neighbor)
+
+
 def cmd_create(world: World, args: list[str]) -> None:
-    if len(args) != 1:
-        print("Usage: create <id>")
+    if len(args) != 3:
+        print("Usage: create <id> <x> <y>")
         return
-    node_id = args[0]
+    node_id, x_str, y_str = args
     if node_id in world.nodes:
         print(f"Node '{node_id}' already exists.")
         return
-    world.add_node(Node(id=node_id))
-    print(f"Created node '{node_id}'.")
+    try:
+        x = int(x_str)
+        y = int(y_str)
+    except ValueError:
+        print("x and y must be integers.")
+        return
+    if not (0 <= x < world.width and 0 <= y < world.height):
+        print(f"Position ({x}, {y}) is outside the grid (0-{world.width - 1}, 0-{world.height - 1}).")
+        return
+    occupant = world.get_node_at(x, y)
+    if occupant is not None:
+        print(f"Position ({x}, {y}) is already occupied by '{occupant.id}'.")
+        return
+    node = Node(id=node_id, x=x, y=y)
+    world.add_node(node)
+    auto_connect_grid_neighbors(world, node)
+    print(f"Created node '{node_id}' at ({x}, {y}).")
+
+
+def cmd_map(world: World) -> None:
+    if not world.nodes:
+        print("No nodes yet.")
+        return
+
+    grid: dict[tuple[int, int], Node] = {(n.x, n.y): n for n in world.nodes.values()}
+    cell_width = max(2, len(str(max(world.width, world.height) - 1)))
+    row_label_width = cell_width + 1
+
+    header = " " * (row_label_width + 1) + " ".join(f"{x:>{cell_width}}" for x in range(world.width))
+    print(header)
+    for y in range(world.height):
+        row = " ".join(
+            f"{(grid[(x, y)].id[0].upper() if (x, y) in grid else '.'):>{cell_width}}" for x in range(world.width)
+        )
+        print(f"{y:>{row_label_width}} {row}")
+
+    print()
+    print("Legend:")
+    for node in sorted(world.nodes.values(), key=lambda n: (n.y, n.x)):
+        print(
+            f"  {node.id[0].upper()} = {node.id} ({node.x}, {node.y}) - "
+            f"{node.country or 'unclaimed'}, {node.terrain.name}"
+        )
 
 
 def cmd_view(world: World, args: list[str]) -> None:
@@ -163,11 +323,24 @@ def cmd_connect(world: World, args: list[str]) -> None:
     if n1 is None or n2 is None:
         print("Both nodes must exist.")
         return
-    if id2 not in n1.connected_tiles:
-        n1.connected_tiles.append(id2)
-    if id1 not in n2.connected_tiles:
-        n2.connected_tiles.append(id1)
+    connect_nodes(n1, n2)
     print(f"Connected '{id1}' <-> '{id2}'.")
+
+
+def cmd_disconnect(world: World, args: list[str]) -> None:
+    if len(args) != 2:
+        print("Usage: disconnect <id1> <id2>")
+        return
+    id1, id2 = args
+    n1, n2 = world.get_node(id1), world.get_node(id2)
+    if n1 is None or n2 is None:
+        print("Both nodes must exist.")
+        return
+    if id2 in n1.connected_tiles:
+        n1.connected_tiles.remove(id2)
+    if id1 in n2.connected_tiles:
+        n2.connected_tiles.remove(id1)
+    print(f"Disconnected '{id1}' <-> '{id2}'.")
 
 
 def cmd_setcountry(world: World, args: list[str]) -> None:
@@ -691,14 +864,23 @@ def cmd_save(world: World, args: list[str]) -> None:
 
 
 def cmd_new_world(world: World, args: list[str]) -> None:
-    if len(args) not in (1, 2):
-        print("Usage: new-world <name> [start_year]")
+    if len(args) not in (3, 4):
+        print("Usage: new-world <name> <width> <height> [start_year]")
         return
     name = args[0]
+    try:
+        width = int(args[1])
+        height = int(args[2])
+    except ValueError:
+        print("Width and height must be integers.")
+        return
+    if width <= 0 or height <= 0:
+        print("Width and height must be positive.")
+        return
     start_year = 0
-    if len(args) == 2:
+    if len(args) == 4:
         try:
-            start_year = int(args[1])
+            start_year = int(args[3])
         except ValueError:
             print("Start year must be an integer.")
             return
@@ -708,10 +890,13 @@ def cmd_new_world(world: World, args: list[str]) -> None:
         return
     world.nodes.clear()
     world.countries.clear()
+    world.width = width
+    world.height = height
     world.year = start_year
+    world.start_year = start_year
     world.save_path = str(path)
     database.save_world(world, str(path))
-    print(f"Created new world '{name}' at '{path}' (starting year {start_year}).")
+    print(f"Created new world '{name}' at '{path}' ({width}x{height} grid, starting year {start_year}).")
 
 
 def cmd_rename_world(world: World, args: list[str]) -> None:
@@ -764,13 +949,20 @@ def run_command(world: World, raw: str) -> bool:
         if not world.nodes:
             print("No nodes yet.")
         for node in world.nodes.values():
-            print(f"  {node.get_id()} - {node.get_country() or 'unclaimed'} ({node.get_terrain().name})")
+            print(
+                f"  {node.get_id()} ({node.get_x()}, {node.get_y()}) - "
+                f"{node.get_country() or 'unclaimed'} ({node.get_terrain().name})"
+            )
+    elif command == "map":
+        cmd_map(world)
     elif command == "create":
         cmd_create(world, args)
     elif command == "view":
         cmd_view(world, args)
     elif command == "connect":
         cmd_connect(world, args)
+    elif command == "disconnect":
+        cmd_disconnect(world, args)
     elif command == "setcountry":
         cmd_setcountry(world, args)
     elif command == "setterrain":
@@ -829,6 +1021,8 @@ def run_command(world: World, raw: str) -> bool:
     elif command == "advance-year":
         advance_year(world)
         print(f"Year advanced to {world.year}.")
+    elif command == "year":
+        print(f"Year: {world.year} ({world.year - world.start_year} years since the file started)")
     elif command == "forceupdate":
         refresh_country_stats(world)
         print(f"Recalculated stats for {len(world.countries)} countries.")
@@ -861,8 +1055,54 @@ def run_command(world: World, raw: str) -> bool:
     return True
 
 
+def make_completer(world: World):
+    def completer(text: str, state: int) -> str | None:
+        buffer = readline.get_line_buffer()
+        prefix_text = buffer[: readline.get_begidx()]
+        try:
+            typed = shlex.split(prefix_text)
+        except ValueError:
+            # an unterminated quote is being typed right now; best-effort fallback
+            typed = prefix_text.replace('"', "").replace("'", "").split()
+
+        if not typed:
+            options: list[str] = COMMAND_NAMES
+        else:
+            command = typed[0].lower()
+            arg_index = len(typed) - 1
+            spec = ARG_COMPLETIONS.get(command)
+            kind = spec[arg_index] if spec and arg_index < len(spec) else []
+            if kind == "node":
+                options = list(world.nodes.keys())
+            elif kind == "country":
+                options = list(world.countries.keys())
+            elif kind == "world_name":
+                options = database.list_worlds()
+            elif isinstance(kind, list):
+                options = kind
+            else:
+                options = []
+
+        matches = [o for o in options if o.lower().startswith(text.lower())]
+        return matches[state] if state < len(matches) else None
+
+    return completer
+
+
+def setup_tab_completion(world: World) -> None:
+    if readline is None:
+        return
+    readline.set_completer(make_completer(world))
+    readline.set_completer_delims(readline.get_completer_delims().replace("-", ""))
+    if "libedit" in (readline.__doc__ or ""):
+        readline.parse_and_bind("bind ^I rl_complete")
+    else:
+        readline.parse_and_bind("tab: complete")
+
+
 def main() -> None:
     world = World()
+    setup_tab_completion(world)
     print("=== nodetech terminal ===")
     print("Type 'help' for a list of commands.")
 

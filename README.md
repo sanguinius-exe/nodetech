@@ -21,6 +21,8 @@ python3 -m venv .venv
 
 Once installed, activate the virtual environment (`source .venv/bin/activate`) and you can just type `nodetech` from anywhere in this project.
 
+Tab-completion works for commands and most arguments (node IDs, country names, building/resource/terrain/division/government names, saved world names) when run in a real terminal — it's not active when piping input in (e.g. `echo commands | python3 main.py`).
+
 ## Commands
 
 ### General
@@ -34,13 +36,13 @@ Once installed, activate the virtual environment (`source .venv/bin/activate`) a
 
 Start here: create a new world, or load one you already have.
 
-| Command                              | Description                                                                                            |
-| ------------------------------------ | ------------------------------------------------------------------------------------------------------ |
-| `new-world <name> [start_year]`      | Create a fresh world and save it as `<name>.json`, optionally starting at a given year (defaults to 0) |
-| `open <name or path>`                | Load a world from a save file, replacing the current one                                               |
-| `list-worlds`                        | List all saved worlds                                                                                  |
-| `rename-world <old_name> <new_name>` | Rename a saved world                                                                                   |
-| `save [name or path]`                | Save the world to a file; reuses the last opened/saved path if omitted                                 |
+| Command                                          | Description                                                                                                                          |
+| ------------------------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------ |
+| `new-world <name> <width> <height> [start_year]` | Create a fresh world with a `<width> x <height>` grid, save it as `<name>.json`, optionally starting at a given year (defaults to 0) |
+| `open <name or path>`                            | Load a world from a save file, replacing the current one                                                                             |
+| `list-worlds`                                    | List all saved worlds                                                                                                                |
+| `rename-world <old_name> <new_name>`             | Rename a saved world                                                                                                                 |
+| `save [name or path]`                            | Save the world to a file; reuses the last opened/saved path if omitted                                                               |
 
 Worlds are saved as JSON via [database.py](database.py), which stores every node (including its nested military deployments and divisions) and every country.
 
@@ -62,25 +64,29 @@ Once you have a world loaded, start a country.
 
 ### Nodes
 
-Nodes are the map tiles a country controls, and where its economy, population, and military live.
+Nodes are the map tiles a country controls, and where its economy, population, and military live. Every world is a grid (`<width> x <height>`, set by `new-world`); every node occupies exactly one `(x, y)` slot on it.
 
-| Command                           | Description                                                                                |
-| --------------------------------- | ------------------------------------------------------------------------------------------ |
-| `create <id>`                     | Create a new node                                                                          |
-| `list`                            | List all nodes                                                                             |
-| `view <id>`                       | View details of a node, including its economic growth rate and projected population growth |
-| `connect <id1> <id2>`             | Connect two nodes                                                                          |
-| `setcountry <id> <country>`       | Set a node's controlling country                                                           |
-| `setterrain <id> <terrain>`       | Set terrain type                                                                           |
-| `setpopulation <id> <population>` | Set a node's population                                                                    |
-| `setpopgrowth <id> <rate>`        | Set a node's population growth rate                                                        |
-| `seteconomy <id> <output>`        | Set a node's economic output                                                               |
-| `build <id> <building>`           | Enable a building                                                                          |
-| `unbuild <id> <building>`         | Disable a building                                                                         |
-| `addresource <id> <resource>`     | Add a resource to a node                                                                   |
-| `removeresource <id> <resource>`  | Remove a resource from a node                                                              |
-| `build-extraction <id> <site>`    | Build an extraction site — only allowed if the node has the resource that site requires    |
-| `unbuild-extraction <id> <site>`  | Remove an extraction site                                                                  |
+| Command                           | Description                                                                                           |
+| --------------------------------- | ----------------------------------------------------------------------------------------------------- |
+| `create <id> <x> <y>`             | Create a new node at a grid position                                                                  |
+| `list`                            | List all nodes, with their positions                                                                  |
+| `map`                             | Print an ASCII map of the grid, with a legend                                                         |
+| `view <id>`                       | View details of a node, including its position, economic growth rate, and projected population growth |
+| `connect <id1> <id2>`             | Connect two nodes                                                                                     |
+| `disconnect <id1> <id2>`          | Remove the connection between two nodes                                                               |
+| `setcountry <id> <country>`       | Set a node's controlling country                                                                      |
+| `setterrain <id> <terrain>`       | Set terrain type                                                                                      |
+| `setpopulation <id> <population>` | Set a node's population                                                                               |
+| `setpopgrowth <id> <rate>`        | Set a node's population growth rate                                                                   |
+| `seteconomy <id> <output>`        | Set a node's economic output                                                                          |
+| `build <id> <building>`           | Enable a building                                                                                     |
+| `unbuild <id> <building>`         | Disable a building                                                                                    |
+| `addresource <id> <resource>`     | Add a resource to a node                                                                              |
+| `removeresource <id> <resource>`  | Remove a resource from a node                                                                         |
+| `build-extraction <id> <site>`    | Build an extraction site — only allowed if the node has the resource that site requires               |
+| `unbuild-extraction <id> <site>`  | Remove an extraction site                                                                             |
+
+A node's position is **required at creation and can't be changed afterward** — `create` rejects a position outside the grid or already occupied by another node (one node per slot). Creating a node **automatically connects it** to any existing node in an orthogonally adjacent slot (up/down/left/right, no diagonals) — the same bidirectional connection `connect` creates manually. `connect`/`disconnect` are still there for links that aren't grid-adjacent, or to remove an auto-created connection.
 
 A node's **economic growth rate isn't set manually** — it's always calculated live from the node's current GDP per capita (richer nodes grow slower, poorer nodes faster, along an S-curve floor/ceiling) plus a modifier per enabled building, and it updates instantly whenever you check `view` or `projections`, not just on `advance-year`. Population growth is still set directly with `setpopgrowth`; a node's *projected* population growth (shown in `view`) is the same kind of live automatic forecast, just informational rather than something that drives the simulation.
 
@@ -109,6 +115,7 @@ Every division has a player-given **name** (must be unique within its own countr
 | `world divisions` | List every country's divisions (deployed and in reserve), grouped by country                                                                  |
 | `projections`     | List every country's economic growth rate and projected population growth rate (calculated live)                                              |
 | `advance-year`    | Advance the game by one year                                                                                                                  |
+| `year`            | Show the current year and how many years have passed since the world started                                                                  |
 | `forceupdate`     | Recalculate every country's GDP and population from its nodes, without advancing the year (growth rates are already live and don't need this) |
 
 ### Reference lists

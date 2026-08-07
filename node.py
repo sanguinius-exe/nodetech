@@ -116,6 +116,8 @@ class MilitaryDeployment:
 @dataclass
 class Node:
     id: str
+    x: int = 0
+    y: int = 0
     country: str | None = None
     terrain: Terrain = Terrain.PLAINS
     connected_tiles: list[str] = field(default_factory=list)
@@ -131,6 +133,15 @@ class Node:
 
     def get_id(self) -> str:
         return self.id
+
+    def get_x(self) -> int:
+        return self.x
+
+    def get_y(self) -> int:
+        return self.y
+
+    def get_position(self) -> tuple[int, int]:
+        return (self.x, self.y)
 
     def get_country(self) -> str | None:
         return self.country

@@ -107,6 +107,8 @@ def _deployment_from_dict(data: dict[str, Any]) -> MilitaryDeployment:
 def _node_to_dict(node: Node) -> dict[str, Any]:
     return {
         "id": node.id,
+        "x": node.x,
+        "y": node.y,
         "country": node.country,
         "terrain": node.terrain.name,
         "connected_tiles": node.connected_tiles,
@@ -125,6 +127,8 @@ def _node_to_dict(node: Node) -> dict[str, Any]:
 def _node_from_dict(data: dict[str, Any]) -> Node:
     return Node(
         id=data["id"],
+        x=data.get("x", 0),
+        y=data.get("y", 0),
         country=data["country"],
         terrain=Terrain[data["terrain"]],
         connected_tiles=data["connected_tiles"],
@@ -169,6 +173,9 @@ def _country_from_dict(data: dict[str, Any]) -> Country:
 def save_world(world: Any, path: str) -> None:
     data = {
         "year": world.year,
+        "start_year": world.start_year,
+        "width": world.width,
+        "height": world.height,
         "nodes": {node_id: _node_to_dict(node) for node_id, node in world.nodes.items()},
         "countries": {name: _country_to_dict(country) for name, country in world.countries.items()},
     }
@@ -214,5 +221,10 @@ def load_into_world(world: Any, path: str) -> None:
         world.countries[name] = _country_from_dict(country_data)
 
     world.year = data.get("year", 0)
+    world.start_year = data.get("start_year", world.year)
+    # Old saves predate grid dimensions/positions - fall back to a generous default so the
+    # world stays usable for adding new nodes; existing nodes just default to (0, 0).
+    world.width = data.get("width", 100)
+    world.height = data.get("height", 100)
 
     _seed_division_id_counters(world)

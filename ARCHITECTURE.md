@@ -91,9 +91,10 @@ A single map tile — the core unit the whole game is built on.
 | Field | Type | Meaning |
 | --- | --- | --- |
 | `id` | `str` | Unique tile identifier, chosen by the player at `create` time |
+| `x` / `y` | `int` | Position on the world's grid, required at `create` time and immutable afterward — see "The world grid" below |
 | `country` | `str \| None` | Name of the controlling `Country`, or `None` if unclaimed |
 | `terrain` | `Terrain` | PLAINS / FOREST / HILLS / MOUNTAIN / DESERT / WATER / URBAN |
-| `connected_tiles` | `list[str]` | IDs of adjacent/linked nodes (bidirectional; `connect` maintains both sides) |
+| `connected_tiles` | `list[str]` | IDs of adjacent/linked nodes (bidirectional; `connect`/`disconnect` both maintain both sides) |
 | `building_options` | `list[bool]` | One flag per `BuildingType`, indexed by `BuildingType.value - 1` (see below) |
 | `resources` | `list[bool]` | One flag per `ResourceType` (`BASIC_MATERIALS` / `RARE_EARTH_METALS` / `OIL_GAS`), same positional-array pattern as `building_options` |
 | `extraction_sites` | `list[bool]` | One flag per `ExtractionSiteType`, same positional-array pattern — see "Resources and extraction sites" below |
@@ -185,11 +186,26 @@ The in-memory container for one game session:
 class World:
     nodes: dict[str, Node]        # keyed by Node.id
     countries: dict[str, Country] # keyed by Country.name
-    year: int                     # defaults to 0, or a value passed to `new-world <name> [start_year]`; incremented by advance_year()
+    year: int                     # defaults to 0, or a value passed to `new-world <name> <width> <height> [start_year]`; incremented by advance_year()
+    start_year: int               # the year this world began at; `year - start_year` is what the `year` command reports as elapsed
     save_path: str | None         # last path used by `open` or `save`, for bare `save`
+    width: int                    # grid dimensions, set by `new-world`; defaults to DEFAULT_GRID_SIZE (10) for a bare World()
+    height: int
 ```
 
 There is exactly one `World` instance per process, created in `main()` and threaded through every command handler. Nothing about the design prevents holding multiple `World` instances (e.g. for a future multi-game-at-once mode), but the terminal loop only ever drives one at a time — `new-world`/`open` both **replace the contents of the current `World` in place** (`.clear()` + repopulate) rather than constructing a new one, which is why `world.save_path` and any other bookkeeping on the `World` object survive across those operations except where explicitly overwritten.
+
+### The world grid
+
+Every `World` has a fixed `width`/`height`, set by `new-world <name> <width> <height> [start_year]` (both required, must be positive). `Node.x`/`y` place a node on that grid — `0 <= x < width`, `0 <= y < height` — and `cmd_create` enforces both the bounds check and that no two nodes share a slot before constructing the `Node`, using `World.get_node_at(x, y)` (a linear scan over `world.nodes.values()`; fine at this scale, no spatial index needed). Position is set once at `create` time and is otherwise immutable — there's no `move`/`setposition` command.
+
+**Creating a node automatically connects it to its orthogonal grid neighbors.** `auto_connect_grid_neighbors()` checks the four adjacent slots — `(x±1, y)` and `(x, y±1)`, no diagonals — via `get_node_at`, and calls `connect_nodes(n1, n2)` for each neighbor found. `connect_nodes()` is the same bidirectional-append-if-absent logic `cmd_connect` uses for manual connections (the two were unified into one helper specifically so an auto-connected pair and a manually-`connect`ed pair end up in identical states). `connect`/`disconnect` remain available afterward for manual, non-adjacent links or to sever an auto-created connection — the grid only decides adjacency at creation time, it doesn't continuously enforce or re-derive `connected_tiles`.
+
+Old save files predate `width`/`height`/`x`/`y` entirely; see "Save file format" below for how those default on load, and "Known limitations" for the consequence (legacy nodes can end up sharing a slot without the usual validation catching it).
+
+#### `map` — ASCII grid rendering
+
+`cmd_map()` prints the grid row by row (`y` from `0` to `height - 1`, top to bottom; `x` left to right within each row): each occupied slot shows the uppercase first letter of its node's ID, empty slots show `.`, followed by a legend mapping each letter back to its full node ID, position, country, and terrain. Cell width is `max(2, len(str(max(width, height) - 1)))`, so coordinate labels and cells stay aligned even on 3-digit grids. Since the on-grid symbol is only ever one letter, two nodes sharing a first letter (e.g. `armory` and `a`) render identically on the grid — the legend beneath is what actually disambiguates them, not just a decorative addition.
 
 ### Node/Country cross-references
 
@@ -211,6 +227,24 @@ There is no automatic consistency check elsewhere — if code ever mutates `node
 
 The loop itself (`main()`) is a trivial `input()` → `run_command()` → repeat cycle; `run_command` returns `False` on `quit`/`exit` to end it. `EOFError`/`KeyboardInterrupt` on `input()` also end the loop gracefully.
 
+### Tab-completion
+
+`main.py` wraps the stdlib `readline` module to support Tab-completion in a real interactive terminal. The import is defensive (`readline = None` if unavailable on the platform, e.g. some Windows builds) and every use is guarded by `if readline is not None`, so the game runs identically without it — completion is a pure enhancement, never a dependency. Piped/non-interactive input (like `printf '...' | python3 main.py`, used throughout this project's own testing) never exercises it either, since `readline` only hooks a real TTY.
+
+`setup_tab_completion(world)` (called once from `main()`) does three things:
+
+1. `readline.set_completer(make_completer(world))` — installs the completion function.
+2. Strips `-` out of `readline.get_completer_delims()`. On at least one tested platform (macOS, libedit-backed `readline`) the default delimiter set includes `-`, which would otherwise split a partially-typed `build-e` into just `e` at the word boundary — breaking completion for every hyphenated command (`build-extraction`, `create-country`, etc.). Everything else in the default delimiter set (whitespace, quotes) is left alone.
+3. Detects libedit vs. GNU readline (`"libedit" in readline.__doc__`) to issue the right `parse_and_bind` syntax for Tab, since the two implementations use different binding syntax.
+
+`make_completer(world)` returns a closure implementing readline's `completer(text, state)` protocol — called repeatedly with increasing `state` until it returns `None`, collecting one match per call:
+
+1. It reads `readline.get_line_buffer()` and `get_begidx()` to recover everything typed *before* the word currently being completed, then re-parses it with `shlex.split()` — falling back to a quote-stripped `.split()` if that raises (an unterminated quote, because the in-progress word itself is inside an open quote).
+2. If nothing precedes the current word, it's the command name being typed — completes against `COMMAND_NAMES`, a hardcoded list mirroring every branch of `run_command`'s dispatch chain (including `"world"` for the `world status`/`world divisions` two-word form).
+3. Otherwise it looks up `ARG_COMPLETIONS[command][position]`, a table of per-command, per-argument completion sources: `"node"`/`"country"` resolve dynamically against the live `world.nodes`/`world.countries`, `"world_name"` calls `database.list_worlds()`, a literal list is a fixed vocabulary (enum member names, lowercased), and any position missing from the table (free-text names, numbers) yields no suggestions.
+
+Known rough edge: quoted multi-word values (like a country name typed as `"Fedran Republic`) complete on a best-effort basis — the fallback parser handles the in-progress unterminated quote without crashing, but readline's own quote-boundary handling isn't specially tuned here, so completion of the second+ word inside a quoted argument is less polished than single-word completions.
+
 ## Persistence ([database.py](database.py))
 
 ### Save file format
@@ -220,9 +254,11 @@ A save file is one JSON object:
 ```jsonc
 {
   "year": 2,
+  "start_year": 0,
+  "width": 10, "height": 10,
   "nodes": {
     "<node_id>": {
-      "id": "...", "country": "...", "terrain": "HILLS",
+      "id": "...", "x": 3, "y": 4, "country": "...", "terrain": "HILLS",
       "connected_tiles": ["..."],
       "building_options": [true, false, ...],   // positional, see building_options above
       "resources": [true, false, false],        // positional, one per ResourceType
@@ -261,7 +297,7 @@ Enums are stored by member **name** (`"HILLS"`, not `1`), so the encoding is sta
 - `save_world(world, path)` — serializes and writes, always overwriting whatever is at `path`.
 - `load_into_world(world, path)` — reads JSON, then `.clear()`s and repopulates `world.nodes` / `world.countries` / `world.year` **in place**, then reseeds the per-country division ID counters (see "Division IDs and names" above). It mutates the object you pass in rather than returning a new one, which is why `cmd_open` can call it on the live `World` and have the running session immediately reflect the loaded file.
 
-Deserialization is intentionally strict for fields that predate save-format evolution: it indexes required dict keys directly (`data["id"]`, etc.) rather than using `.get()` with defaults, so a hand-edited or badly corrupted save file fails loudly with a `KeyError` (caught and reported by `cmd_open`) instead of silently producing a half-populated `Node`. Fields added *after* the format already existed (`name`, `resources`, `extraction_sites`, `projected_population_growth_rate`, `reserve_divisions`) use `.get()` with sensible defaults instead, specifically so older save files without them still load cleanly — a save from before `ResourceType`/`ExtractionSiteType` existed loads with every resource/extraction-site flag defaulted to `False`. `Country`'s old, now-removed `economic_growth_rate`/`projected_economic_growth_rate`/`projected_population_growth_rate` keys, if present in an older save, are simply ignored on load rather than causing an error — `Country` no longer has fields for them.
+Deserialization is intentionally strict for fields that predate save-format evolution: it indexes required dict keys directly (`data["id"]`, etc.) rather than using `.get()` with defaults, so a hand-edited or badly corrupted save file fails loudly with a `KeyError` (caught and reported by `cmd_open`) instead of silently producing a half-populated `Node`. Fields added *after* the format already existed (`name`, `resources`, `extraction_sites`, `projected_population_growth_rate`, `reserve_divisions`, `x`, `y`, `start_year`, `width`, `height`) use `.get()` with sensible defaults instead, specifically so older save files without them still load cleanly — a save from before `ResourceType`/`ExtractionSiteType` existed loads with every resource/extraction-site flag defaulted to `False`, a save from before the grid existed loads every node at `(0, 0)` with the world defaulted to a generous `100 × 100` grid (see "Known limitations" for why `(0, 0)` for every legacy node is a real, if harmless, quirk). `Country`'s old, now-removed `economic_growth_rate`/`projected_economic_growth_rate`/`projected_population_growth_rate` keys, if present in an older save, are simply ignored on load rather than causing an error — `Country` no longer has fields for them.
 
 ### Save file location
 
@@ -290,3 +326,5 @@ Flat module layout (no `src/` package directory) declared via `[tool.setuptools]
 - **No combat**: divisions (including air force ones) can occupy the same node from opposing countries with nothing resolving the conflict.
 - **Single global `World`**: the terminal only ever manages one game at a time in memory; `new-world`/`open` overwrite it rather than switching between multiple loaded worlds.
 - **Division names are only unique per-country, not globally**: this is intentional (two countries can each field a "1st Infantry"), but means a division "name" alone is never a safe global key outside the context of a known country.
+- **Legacy save files can violate the one-node-per-slot invariant**: `cmd_create` enforces it, but `load_into_world` doesn't re-validate — it just constructs whatever `Node`s the file describes. A save from before the grid existed defaults every node to `(0, 0)`, so loading one with multiple nodes silently puts them all on the same slot; nothing crashes, but `map`'s rendering (and any future spatial logic) would only show one of them at that position.
+- **Node position is set once and never moves**: there's no `move`/`setposition` command, and grid-neighbor auto-connection only happens at `create` time — nothing re-derives `connected_tiles` afterward.
