@@ -1,0 +1,289 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>nodetech (web)</title>
+<style>
+  html, body { height: 100%; margin: 0; }
+  body { background: #1c1c1f; color: #eee; font-family: system-ui, sans-serif; }
+
+  header {
+    display: flex;
+    align-items: center;
+    gap: 16px;
+    padding: 16px 24px;
+    border-bottom: 1px solid #35353a;
+  }
+  header h1 { font-size: 18px; font-weight: 600; margin: 0; }
+  #controls { display: flex; align-items: center; gap: 10px; font-size: 13px; color: #999; }
+  #status {
+    margin-left: auto;
+    background: #26262a;
+    border-radius: 8px;
+    padding: 6px 12px;
+    font-size: 13px;
+    font-weight: 600;
+  }
+  button, .file-btn {
+    font: inherit;
+    background: #35353a;
+    color: #eee;
+    border: none;
+    border-radius: 4px;
+    padding: 6px 10px;
+    cursor: pointer;
+    display: inline-block;
+  }
+  button:disabled, .file-btn.is-disabled { opacity: 0.5; cursor: default; pointer-events: none; }
+  #load-file { position: absolute; width: 1px; height: 1px; overflow: hidden; opacity: 0; }
+
+  .app-layout { display: flex; gap: 24px; align-items: flex-start; padding: 24px; }
+
+  #terminal-pane {
+    flex: 1 1 460px;
+    max-width: 640px;
+    min-width: 360px;
+    display: flex;
+    flex-direction: column;
+  }
+  #output {
+    font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+    font-size: 13px;
+    white-space: pre-wrap;
+    word-break: break-word;
+    height: 65vh;
+    overflow-y: auto;
+  }
+  #cmd-form {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding-top: 8px;
+    border-top: 1px solid #35353a;
+  }
+  #cmd-form .prompt { color: #999; }
+  #cmd-input {
+    flex: 1;
+    background: transparent;
+    border: none;
+    outline: none;
+    color: #eee;
+    font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+    font-size: 13px;
+  }
+
+  #map-pane { flex: 1; min-width: 0; border-radius: 8px; overflow: hidden; }
+  #map-pane .map-placeholder { color: #999; font-size: 13px; margin: 0; }
+</style>
+</head>
+<body>
+  <header>
+    <h1>nodetech</h1>
+    <div id="controls">
+      <label class="file-btn is-disabled" id="load-file-label" for="load-file">Load save</label>
+      <input type="file" id="load-file" accept=".json" disabled>
+      <button id="download-save-btn" disabled>Download current save</button>
+    </div>
+    <span id="status">Loading Python runtime...</span>
+  </header>
+  <main class="app-layout">
+    <section id="terminal-pane">
+      <div id="output"></div>
+      <form id="cmd-form">
+        <span class="prompt">&gt;</span>
+        <input type="text" id="cmd-input" autocomplete="off" disabled autofocus>
+      </form>
+    </section>
+    <aside id="map-pane" class="map-page">
+      <p class="map-placeholder">Run the <code>map</code> command to render the world here.</p>
+    </aside>
+  </main>
+
+  <script src="https://cdn.jsdelivr.net/pyodide/v0.26.2/full/pyodide.js"></script>
+  <script>
+    const outputEl = document.getElementById("output");
+    const formEl = document.getElementById("cmd-form");
+    const inputEl = document.getElementById("cmd-input");
+    const loadFileEl = document.getElementById("load-file");
+    const downloadBtn = document.getElementById("download-save-btn");
+    const statusEl = document.getElementById("status");
+    const mapPaneEl = document.getElementById("map-pane");
+
+    let pyodide;
+    let game;
+    let world;
+    const history = [];
+    let historyIndex = 0;
+
+    function appendOutput(text) {
+      outputEl.textContent += text;
+      outputEl.scrollTop = outputEl.scrollHeight;
+    }
+
+    function shellQuote(s) {
+      return '"' + String(s).replace(/([\\"])/g, "\\$1") + '"';
+    }
+
+    // Splices the map's generated page directly into #map-pane instead of opening it as a
+    // separate document: the map's own <style> (shared .map-page/.tile/.panel/... rules) gets
+    // injected once into a dedicated <style> tag so it renders with the exact same look as the
+    // standalone map.html the CLI writes, and its <script> (hover behavior) is re-attached each
+    // time since scripts inserted via innerHTML don't execute on their own.
+    function updateMapPane(html) {
+      const doc = new DOMParser().parseFromString(html, "text/html");
+
+      let styleEl = document.getElementById("map-style");
+      if (!styleEl) {
+        styleEl = document.createElement("style");
+        styleEl.id = "map-style";
+        document.head.appendChild(styleEl);
+      }
+      const sourceStyle = doc.querySelector("style");
+      styleEl.textContent = sourceStyle ? sourceStyle.textContent : "";
+
+      const scriptEl = doc.querySelector("script");
+      const scriptText = scriptEl ? scriptEl.textContent : "";
+      if (scriptEl) scriptEl.remove();
+
+      mapPaneEl.innerHTML = doc.body.innerHTML;
+
+      if (scriptText) {
+        const s = document.createElement("script");
+        s.textContent = scriptText;
+        mapPaneEl.appendChild(s);
+      }
+    }
+
+    // The game's `map` command normally shells out via webbrowser.open() to a real browser -
+    // there's no such thing inside Pyodide's sandbox, so this gets wired in as a replacement:
+    // read the HTML the game already wrote to the virtual filesystem and splice it into the
+    // page instead of opening a new tab.
+    window.handleMapOpen = function (uri) {
+      const path = decodeURIComponent(uri.replace(/^file:\/\//, ""));
+      try {
+        const data = pyodide.FS.readFile(path, { encoding: "utf8" });
+        updateMapPane(data);
+      } catch (e) {
+        appendOutput("[failed to render map: " + e + "]\n");
+      }
+    };
+
+    async function init() {
+      appendOutput("Loading Python runtime, this may take a few seconds...\n");
+      pyodide = await loadPyodide();
+
+      const files = ["main.py", "node.py", "country.py", "division.py", "database.py"];
+      for (const f of files) {
+        const resp = await fetch("../" + f);
+        if (!resp.ok) throw new Error("failed to fetch " + f + " (" + resp.status + ")");
+        pyodide.FS.writeFile(f, await resp.text());
+      }
+
+      pyodide.setStdout({ batched: (msg) => appendOutput(msg + "\n") });
+      pyodide.setStderr({ batched: (msg) => appendOutput(msg + "\n") });
+
+      pyodide.runPython(`
+import sys
+sys.path.insert(0, ".")
+import js as _js
+import database
+import main as game
+
+def _web_open(url, new=0, autoraise=True):
+    _js.handleMapOpen(url)
+    return True
+
+game.webbrowser.open = _web_open
+world = game.World()
+`);
+      game = pyodide.globals.get("game");
+      world = pyodide.globals.get("world");
+
+      appendOutput("=== nodetech web terminal ===\nType 'help' for a list of commands.\n\n");
+      statusEl.textContent = "Ready.";
+      inputEl.disabled = false;
+      loadFileEl.disabled = false;
+      document.getElementById("load-file-label").classList.remove("is-disabled");
+      downloadBtn.disabled = false;
+      inputEl.focus();
+    }
+
+    function runLine(line) {
+      appendOutput("> " + line + "\n");
+      let keepGoing = true;
+      try {
+        keepGoing = game.run_command(world, line);
+      } catch (e) {
+        appendOutput("[error running command: " + e + "]\n");
+      }
+      if (keepGoing === false) {
+        appendOutput("\n[session ended - reload the page to start a new one]\n");
+        inputEl.disabled = true;
+      }
+    }
+
+    formEl.addEventListener("submit", (e) => {
+      e.preventDefault();
+      const line = inputEl.value;
+      inputEl.value = "";
+      if (!line.trim()) return;
+      history.push(line);
+      historyIndex = history.length;
+      runLine(line);
+    });
+
+    inputEl.addEventListener("keydown", (e) => {
+      if (e.key === "ArrowUp") {
+        if (historyIndex > 0) {
+          historyIndex--;
+          inputEl.value = history[historyIndex];
+        }
+        e.preventDefault();
+      } else if (e.key === "ArrowDown") {
+        if (historyIndex < history.length - 1) {
+          historyIndex++;
+          inputEl.value = history[historyIndex];
+        } else {
+          historyIndex = history.length;
+          inputEl.value = "";
+        }
+        e.preventDefault();
+      }
+    });
+
+    loadFileEl.addEventListener("change", async () => {
+      const file = loadFileEl.files[0];
+      if (!file) return;
+      const text = await file.text();
+      const name = file.name.replace(/\.json$/i, "");
+      pyodide.globals.set("_upload_name", name);
+      const path = pyodide.runPython("str(database.resolve_save_path(_upload_name))");
+      pyodide.FS.writeFile(path, text);
+      runLine("open " + shellQuote(name));
+      loadFileEl.value = "";
+    });
+
+    downloadBtn.addEventListener("click", () => {
+      runLine("save");
+      const savePath = world.save_path;
+      if (!savePath) return;
+      try {
+        const data = pyodide.FS.readFile(savePath, { encoding: "utf8" });
+        const blob = new Blob([data], { type: "application/json" });
+        const a = document.createElement("a");
+        a.href = URL.createObjectURL(blob);
+        a.download = savePath.split("/").pop();
+        a.click();
+        URL.revokeObjectURL(a.href);
+      } catch (e) {
+        appendOutput("[download failed: " + e + "]\n");
+      }
+    });
+
+    init().catch((e) => {
+      appendOutput("[failed to start: " + e + "]\n");
+      statusEl.textContent = "Failed to load.";
+    });
+  </script>
+</body>
+</html>

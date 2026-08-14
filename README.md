@@ -23,6 +23,24 @@ Once installed, activate the virtual environment (`source .venv/bin/activate`) a
 
 Tab-completion works for commands and most arguments (node IDs, country names, building/resource/terrain/division/government names, saved world names) when run in a real terminal — it's not active when piping input in (e.g. `echo commands | python3 main.py`).
 
+## Running in the browser
+
+The same game also runs entirely client-side via [Pyodide](https://pyodide.org/) (CPython compiled to WebAssembly) — no install, no server-side process, and it's the actual `main.py`/`node.py`/`country.py`/`division.py`/`database.py` executing, not a reimplementation.
+
+```bash
+python3 -m http.server 8000
+```
+
+Run that from the repo root, then open `http://localhost:8000/web/index.html`. It has to be served over HTTP — opening `web/index.html` directly as a `file://` path won't work, since the page fetches the `.py` source files from the server on load.
+
+It supports the same commands as the CLI, typed into the same kind of terminal, plus:
+
+- **Load save**: pick a `.json` save file from your computer to load it into the running world.
+- **Download current save**: saves the current world and downloads it as a file.
+- `map` renders inline in a panel next to the terminal instead of opening a separate window.
+
+Game state only exists in the browser tab's memory — reloading the page starts a fresh session, so download a save first if you want to keep one.
+
 ## Commands
 
 ### General
@@ -70,7 +88,7 @@ Nodes are the map tiles a country controls, and where its economy, population, a
 | --------------------------------- | ----------------------------------------------------------------------------------------------------- |
 | `create <id> <x> <y>`             | Create a new node at a grid position                                                                  |
 | `list`                            | List all nodes, with their positions                                                                  |
-| `map`                             | Print an ASCII map of the grid, with a legend                                                         |
+| `map`                             | Generate an interactive HTML map of the grid (colored by owning country) and open it in your browser  |
 | `view <id>`                       | View details of a node, including its position, economic growth rate, and projected population growth |
 | `connect <id1> <id2>`             | Connect two nodes                                                                                     |
 | `disconnect <id1> <id2>`          | Remove the connection between two nodes                                                               |
@@ -91,6 +109,8 @@ A node's position is **required at creation and can't be changed afterward** —
 A node's **economic growth rate isn't set manually** — it's always calculated live from the node's current GDP per capita (richer nodes grow slower, poorer nodes faster, along an S-curve floor/ceiling) plus a modifier per enabled building, and it updates instantly whenever you check `view` or `projections`, not just on `advance-year`. Population growth is still set directly with `setpopgrowth`; a node's *projected* population growth (shown in `view`) is the same kind of live automatic forecast, just informational rather than something that drives the simulation.
 
 **Resources** (`BASIC_MATERIALS`, `RARE_EARTH_METALS`, `OIL_GAS`) represent what a node has naturally. **Extraction sites** (`BASIC_MATERIALS_MINE`, `RARE_EARTH_MINE`, `OIL_RIG`) are structures you build to exploit a resource — each one requires its matching resource to already be present on the node (`build-extraction` refuses otherwise) — and once built, give a much larger economic growth boost than an ordinary building.
+
+`map` writes a colored, interactive map to `~/proppunk game files/map.html` and opens it in your default browser — one tile per grid slot, colored by owning country, with a legend and a side panel that shows every country's live GDP/population by default and swaps to a tile's own stats (position, country, terrain, population, economic output) when you hover it.
 
 ### Military
 

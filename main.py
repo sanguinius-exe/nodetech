@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import shlex
+import webbrowser
 from pathlib import Path
 
 try:
@@ -277,59 +278,205 @@ def cmd_create(world: World, args: list[str]) -> None:
     print(f"Created node '{node_id}' at ({x}, {y}).")
 
 
-ANSI_MAP_COLORS = [
-    "\033[31m",  # red
-    "\033[32m",  # green
-    "\033[33m",  # yellow
-    "\033[34m",  # blue
-    "\033[35m",  # magenta
-    "\033[36m",  # cyan
-    "\033[91m",  # bright red
-    "\033[92m",  # bright green
-    "\033[93m",  # bright yellow
-    "\033[94m",  # bright blue
-    "\033[95m",  # bright magenta
-    "\033[96m",  # bright cyan
+MAP_TILE_COLORS = [
+    "#e74c3c",  # red
+    "#2ecc71",  # green
+    "#f1c40f",  # yellow
+    "#3498db",  # blue
+    "#9b59b6",  # magenta
+    "#1abc9c",  # teal
+    "#ff8a80",  # bright red
+    "#8affab",  # bright green
+    "#fff176",  # bright yellow
+    "#82b1ff",  # bright blue
+    "#ea80fc",  # bright magenta
+    "#84ffff",  # bright teal
 ]
-ANSI_RESET = "\033[0m"
+MAP_UNCLAIMED_COLOR = "#5a5a63"
+MAP_EMPTY_COLOR = "#232326"
 
 
 def assign_country_colors(world: World) -> dict[str, str]:
-    return {name: ANSI_MAP_COLORS[i % len(ANSI_MAP_COLORS)] for i, name in enumerate(world.countries)}
+    return {name: MAP_TILE_COLORS[i % len(MAP_TILE_COLORS)] for i, name in enumerate(world.countries)}
+
+
+def _escape_html(text: str) -> str:
+    return text.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;").replace('"', "&quot;")
+
+
+def _format_compact_number(n: float) -> str:
+    if n >= 1_000_000_000:
+        return f"{n / 1_000_000_000:.1f}B"
+    if n >= 1_000_000:
+        return f"{n / 1_000_000:.1f}M"
+    if n >= 1_000:
+        return f"{n / 1_000:.1f}K"
+    return f"{n:.0f}"
+
+# Plain (non-f) templates for the CSS/JS blocks, so their braces never collide with Python's
+# f-string interpolation - dynamic bits are filled in with simple __TOKEN__ substitution instead.
+MAP_CSS_TEMPLATE = """
+  .map-page {
+    position: relative;
+    background: #1c1c1f;
+    color: #eee;
+    font-family: system-ui, sans-serif;
+    padding: 24px;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+  }
+  h1 { font-size: 18px; font-weight: 600; margin: 0 0 16px; }
+  h2 { font-size: 13px; font-weight: 600; margin: 0 0 12px; color: #999; text-transform: uppercase; letter-spacing: 0.04em; }
+  .year-badge {
+    position: absolute;
+    top: 24px;
+    right: 24px;
+    background: #26262a;
+    border-radius: 8px;
+    padding: 10px 16px;
+    font-size: 13px;
+    font-weight: 600;
+  }
+  .layout { display: flex; gap: 24px; align-items: flex-start; }
+  .map {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    background: #1c1c1f;
+    padding: 1px;
+    flex-shrink: 0;
+  }
+  .map-row { display: flex; gap: 1px; margin-bottom: 1px; }
+  .map-row:last-child { margin-bottom: 0; }
+  .tile { flex-shrink: 0; }
+  .tile:not(.empty):hover { outline: 2px solid #fff; outline-offset: -2px; cursor: default; }
+  .tile.empty { background: __EMPTY_COLOR__; }
+  .legend { margin-top: 20px; display: flex; flex-wrap: wrap; gap: 12px 20px; font-size: 13px; }
+  .legend-item { display: flex; align-items: center; gap: 6px; }
+  .swatch { width: 12px; height: 12px; border-radius: 2px; display: inline-block; flex-shrink: 0; }
+  .panel { width: 260px; flex-shrink: 0; background: #26262a; border-radius: 8px; padding: 16px; min-height: 120px; }
+  .stat { display: flex; justify-content: space-between; gap: 12px; font-size: 13px; padding: 4px 0; border-bottom: 1px solid #35353a; }
+  .stat:last-child { border-bottom: none; }
+  .stat span:first-child { color: #999; }
+  .country-row { display: flex; align-items: center; gap: 8px; font-size: 13px; padding: 6px 0; border-bottom: 1px solid #35353a; }
+  .country-row:last-child { border-bottom: none; }
+  .country-name { flex: 1; }
+  .country-stats { color: #999; font-size: 12px; white-space: nowrap; }
+"""
+
+MAP_JS = """
+(function () {
+  var panel = document.getElementById('panel');
+  var defaultHTML = panel.innerHTML;
+  var mapEl = document.querySelector('.map');
+
+  function renderTile(tile) {
+    panel.innerHTML =
+      '<h2>' + tile.dataset.id + '</h2>' +
+      '<div class="stat"><span>Position</span><span>(' + tile.dataset.x + ', ' + tile.dataset.y + ')</span></div>' +
+      '<div class="stat"><span>Country</span><span>' + tile.dataset.country + '</span></div>' +
+      '<div class="stat"><span>Terrain</span><span>' + tile.dataset.terrain + '</span></div>' +
+      '<div class="stat"><span>Population</span><span>' + tile.dataset.population + '</span></div>' +
+      '<div class="stat"><span>Economic output</span><span>' + tile.dataset.economic + '</span></div>';
+  }
+
+  mapEl.addEventListener('mouseover', function (e) {
+    var tile = e.target.closest('.tile');
+    if (!tile || !tile.dataset.id) return;
+    renderTile(tile);
+  });
+
+  mapEl.addEventListener('mouseleave', function () {
+    panel.innerHTML = defaultHTML;
+  });
+})();
+"""
+
+
+def build_map_html(world: World) -> str:
+    save_name = Path(world.save_path).stem if world.save_path else "unsaved world"
+    country_colors = assign_country_colors(world)
+    grid: dict[tuple[int, int], Node] = {(n.x, n.y): n for n in world.nodes.values()}
+    tile_size = max(6, min(40, 2000 // max(world.width, world.height)))
+
+    def tile_html(x: int, y: int) -> str:
+        node = grid.get((x, y))
+        if node is None:
+            return f'<div class="tile empty" style="width:{tile_size}px;height:{tile_size}px"></div>'
+        color = country_colors[node.country] if node.country else MAP_UNCLAIMED_COLOR
+        return (
+            f'<div class="tile" style="width:{tile_size}px;height:{tile_size}px;background:{color}" '
+            f'data-id="{_escape_html(node.id)}" data-x="{node.x}" data-y="{node.y}" '
+            f'data-country="{_escape_html(node.country or "unclaimed")}" '
+            f'data-terrain="{node.terrain.name}" '
+            f'data-population="{node.population:,}" '
+            f'data-economic="{node.economic_output:,.0f}"></div>'
+        )
+
+    rows = []
+    for y in range(world.height):
+        tiles = [tile_html(x, y) for x in range(world.width)]
+        rows.append(f'<div class="map-row">{"".join(tiles)}</div>')
+
+    legend_items = [
+        f'<div class="legend-item"><span class="swatch" style="background:{color}"></span>{_escape_html(name)}</div>'
+        for name, color in country_colors.items()
+    ]
+    legend_items.append(
+        f'<div class="legend-item"><span class="swatch" style="background:{MAP_UNCLAIMED_COLOR}"></span>unclaimed</div>'
+    )
+
+    country_rows = [
+        f'<div class="country-row">'
+        f'<span class="swatch" style="background:{country_colors[name]}"></span>'
+        f'<span class="country-name">{_escape_html(name)}</span>'
+        f'<span class="country-stats">GDP {_format_compact_number(country.calculate_economic_output(world.nodes))} '
+        f"&middot; Pop {_format_compact_number(country.calculate_population(world.nodes))}</span>"
+        f"</div>"
+        for name, country in world.countries.items()
+    ]
+    default_panel_body = "".join(country_rows) if country_rows else "<p>No countries yet.</p>"
+
+    css = MAP_CSS_TEMPLATE.replace("__EMPTY_COLOR__", MAP_EMPTY_COLOR)
+
+    return f"""<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>{_escape_html(save_name)}</title>
+<style>{css}</style>
+</head>
+<body class="map-page">
+  <h1>{_escape_html(save_name)}</h1>
+  <div class="year-badge">Year {world.year}</div>
+  <div class="layout">
+    <div class="map">
+      {"".join(rows)}
+    </div>
+    <div class="panel" id="panel">
+      <h2>Countries</h2>
+      {default_panel_body}
+    </div>
+  </div>
+  <div class="legend">
+    {"".join(legend_items)}
+  </div>
+  <script>{MAP_JS}</script>
+</body>
+</html>
+"""
 
 
 def cmd_map(world: World) -> None:
     if not world.nodes:
         print("No nodes yet.")
         return
-
-    grid: dict[tuple[int, int], Node] = {(n.x, n.y): n for n in world.nodes.values()}
-    country_colors = assign_country_colors(world)
-    cell_width = max(2, len(str(max(world.width, world.height) - 1)))
-    row_label_width = cell_width + 1
-
-    def colorize(text: str, country: str | None) -> str:
-        color = country_colors.get(country) if country else None
-        return f"{color}{text}{ANSI_RESET}" if color else text
-
-    header = " " * (row_label_width + 1) + " ".join(f"{x:>{cell_width}}" for x in range(world.width))
-    print(header)
-    for y in range(world.height):
-        cells = []
-        for x in range(world.width):
-            node = grid.get((x, y))
-            symbol = f"{(node.id[0].upper() if node else '.'):>{cell_width}}"
-            cells.append(colorize(symbol, node.country) if node else symbol)
-        print(f"{y:>{row_label_width}} {' '.join(cells)}")
-
-    print()
-    print("Legend:")
-    for node in sorted(world.nodes.values(), key=lambda n: (n.y, n.x)):
-        letter = colorize(node.id[0].upper(), node.country)
-        print(
-            f"  {letter} = {node.id} ({node.x}, {node.y}) - "
-            f"{node.country or 'unclaimed'}, {node.terrain.name}"
-        )
+    html = build_map_html(world)
+    path = database.ensure_save_dir() / "map.html"
+    path.write_text(html)
+    webbrowser.open(path.as_uri())
+    print(f"Map written to '{path}' and opened in your browser.")
 
 
 def cmd_view(world: World, args: list[str]) -> None:
