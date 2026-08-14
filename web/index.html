@@ -5,9 +5,16 @@
 <title>nodetech (web)</title>
 <style>
   html, body { height: 100%; margin: 0; }
-  body { background: #1c1c1f; color: #eee; font-family: system-ui, sans-serif; }
+  body {
+    background: #1c1c1f;
+    color: #eee;
+    font-family: system-ui, sans-serif;
+    display: flex;
+    flex-direction: column;
+  }
 
   header {
+    flex: 0 0 auto;
     display: flex;
     align-items: center;
     gap: 16px;
@@ -37,24 +44,33 @@
   button:disabled, .file-btn.is-disabled { opacity: 0.5; cursor: default; pointer-events: none; }
   #load-file { position: absolute; width: 1px; height: 1px; overflow: hidden; opacity: 0; }
 
-  .app-layout { display: flex; gap: 24px; align-items: flex-start; padding: 24px; }
+  .app-layout {
+    flex: 1 1 auto;
+    min-height: 0;
+    display: flex;
+    padding: 24px;
+    box-sizing: border-box;
+  }
 
   #terminal-pane {
-    flex: 1 1 460px;
-    max-width: 640px;
-    min-width: 360px;
+    flex: 0 0 480px;
+    max-width: 70%;
+    min-width: 320px;
+    min-height: 0;
     display: flex;
     flex-direction: column;
   }
   #output {
+    flex: 1;
+    min-height: 0;
     font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
     font-size: 13px;
     white-space: pre-wrap;
     word-break: break-word;
-    height: 65vh;
     overflow-y: auto;
   }
   #cmd-form {
+    flex: 0 0 auto;
     display: flex;
     align-items: center;
     gap: 8px;
@@ -72,8 +88,42 @@
     font-size: 13px;
   }
 
-  #map-pane { flex: 1; min-width: 0; border-radius: 8px; overflow: hidden; }
+  /* Draggable divider between the terminal and map panes. */
+  #pane-splitter {
+    flex: 0 0 10px;
+    margin: 0 8px;
+    cursor: col-resize;
+    position: relative;
+  }
+  #pane-splitter::after {
+    content: "";
+    position: absolute;
+    top: 0;
+    bottom: 0;
+    left: 4px;
+    width: 2px;
+    background: #35353a;
+    border-radius: 1px;
+  }
+  #pane-splitter:hover::after, #pane-splitter.dragging::after { background: #55555c; }
+
+  /* The map pane fits whatever the game generates into the available space: the sizer is
+     given the post-scale pixel dimensions in JS, and the wrapper inside it (holding the
+     map's actual markup, at its real/native size) is shrunk or grown with a CSS transform
+     to exactly fill that box - so the whole map is always visible, no scrolling needed. */
+  #map-pane {
+    flex: 1;
+    min-width: 0;
+    min-height: 0;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    overflow: hidden;
+    border-radius: 8px;
+  }
   #map-pane .map-placeholder { color: #999; font-size: 13px; margin: 0; }
+  #map-scale-sizer { position: relative; overflow: hidden; flex-shrink: 0; }
+  #map-scale-wrapper { transform-origin: top left; }
 </style>
 </head>
 <body>
@@ -94,7 +144,8 @@
         <input type="text" id="cmd-input" autocomplete="off" disabled autofocus>
       </form>
     </section>
-    <aside id="map-pane" class="map-page">
+    <div id="pane-splitter"></div>
+    <aside id="map-pane">
       <p class="map-placeholder">Run the <code>map</code> command to render the world here.</p>
     </aside>
   </main>
@@ -128,7 +179,11 @@
     // separate document: the map's own <style> (shared .map-page/.tile/.panel/... rules) gets
     // injected once into a dedicated <style> tag so it renders with the exact same look as the
     // standalone map.html the CLI writes, and its <script> (hover behavior) is re-attached each
-    // time since scripts inserted via innerHTML don't execute on their own.
+    // time since scripts inserted via innerHTML don't execute on their own. The markup goes
+    // inside a #map-scale-wrapper/#map-scale-sizer pair (see fitMapToPane) so the whole map -
+    // however big the world is - always fits in the visible pane instead of needing to scroll.
+    let mapContentSize = null;
+
     function updateMapPane(html) {
       const doc = new DOMParser().parseFromString(html, "text/html");
 
@@ -145,14 +200,39 @@
       const scriptText = scriptEl ? scriptEl.textContent : "";
       if (scriptEl) scriptEl.remove();
 
-      mapPaneEl.innerHTML = doc.body.innerHTML;
+      mapPaneEl.innerHTML = '<div id="map-scale-sizer"><div id="map-scale-wrapper" class="map-page"></div></div>';
+      const wrapper = document.getElementById("map-scale-wrapper");
+      wrapper.innerHTML = doc.body.innerHTML;
 
       if (scriptText) {
         const s = document.createElement("script");
         s.textContent = scriptText;
-        mapPaneEl.appendChild(s);
+        wrapper.appendChild(s);
       }
+
+      // Measure the map's real, unscaled size once (before any transform is applied) and
+      // cache it - fitMapToPane() only needs to recompute the scale factor after this, not
+      // re-measure, so window/splitter resizing stays smooth instead of thrashing layout.
+      mapContentSize = { width: wrapper.scrollWidth, height: wrapper.scrollHeight };
+      fitMapToPane();
     }
+
+    function fitMapToPane() {
+      if (!mapContentSize || !mapContentSize.width || !mapContentSize.height) return;
+      const wrapper = document.getElementById("map-scale-wrapper");
+      const sizer = document.getElementById("map-scale-sizer");
+      if (!wrapper || !sizer) return;
+      const paneRect = mapPaneEl.getBoundingClientRect();
+      const scale = Math.max(
+        0.05,
+        Math.min(paneRect.width / mapContentSize.width, paneRect.height / mapContentSize.height, 4)
+      );
+      wrapper.style.transform = `scale(${scale})`;
+      sizer.style.width = mapContentSize.width * scale + "px";
+      sizer.style.height = mapContentSize.height * scale + "px";
+    }
+
+    new ResizeObserver(() => fitMapToPane()).observe(mapPaneEl);
 
     // The game's `map` command normally shells out via webbrowser.open() to a real browser -
     // there's no such thing inside Pyodide's sandbox, so this gets wired in as a replacement:
@@ -249,6 +329,36 @@ world = game.World()
         }
         e.preventDefault();
       }
+    });
+
+    // Draggable divider: resizes #terminal-pane's flex-basis directly off the mouse position;
+    // #map-pane (flex: 1) just takes whatever's left, and its own ResizeObserver (above)
+    // keeps the map fitted to that as it changes, so the two behaviors compose for free.
+    const splitterEl = document.getElementById("pane-splitter");
+    const terminalPaneEl = document.getElementById("terminal-pane");
+    let splitterDragging = false;
+
+    splitterEl.addEventListener("mousedown", (e) => {
+      splitterDragging = true;
+      splitterEl.classList.add("dragging");
+      document.body.style.userSelect = "none";
+      e.preventDefault();
+    });
+
+    window.addEventListener("mousemove", (e) => {
+      if (!splitterDragging) return;
+      const layoutRect = document.querySelector(".app-layout").getBoundingClientRect();
+      const minWidth = 320;
+      const maxWidth = layoutRect.width * 0.7;
+      const newWidth = Math.max(minWidth, Math.min(maxWidth, e.clientX - layoutRect.left));
+      terminalPaneEl.style.flexBasis = newWidth + "px";
+    });
+
+    window.addEventListener("mouseup", () => {
+      if (!splitterDragging) return;
+      splitterDragging = false;
+      splitterEl.classList.remove("dragging");
+      document.body.style.userSelect = "";
     });
 
     loadFileEl.addEventListener("change", async () => {
