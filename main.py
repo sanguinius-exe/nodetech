@@ -1947,17 +1947,38 @@ def _completion_options(world: World, before_text: str) -> list[str]:
     return []
 
 
+def _before_text(line: str, cursor_pos: int) -> str:
+    """Everything in `line` before the word currently being typed at `cursor_pos` - shared by
+    get_completions() and get_current_arg_index() so they always agree on where one argument
+    ends and the next begins."""
+    prefix_text = line[:cursor_pos]
+    word_match = re.search(r"\S*$", prefix_text)
+    partial = word_match.group(0) if word_match else ""
+    return prefix_text[: len(prefix_text) - len(partial)]
+
+
 def get_completions(world: World, line: str, cursor_pos: int) -> list[str]:
     """Every completion candidate for the partial word ending at cursor_pos in `line`, sorted
     and deduplicated. Frontend-agnostic (no readline dependency) for use by, e.g., the web
     terminal, which drives this off an <input>'s value/selectionStart instead."""
     prefix_text = line[:cursor_pos]
     word_match = re.search(r"\S*$", prefix_text)
-    partial = word_match.group(0) if word_match else ""
-    before_text = prefix_text[: len(prefix_text) - len(partial)]
-    partial = partial.lstrip("\"'")
+    partial = (word_match.group(0) if word_match else "").lstrip("\"'")
+    before_text = _before_text(line, cursor_pos)
     options = _completion_options(world, before_text)
     return sorted({o for o in options if o.lower().startswith(partial.lower())})
+
+
+def get_current_arg_index(line: str, cursor_pos: int) -> int:
+    """0-based index of the argument slot the cursor currently sits in (0 = the first argument
+    after the command name), using the same shlex-based counting get_completions() relies on -
+    lets the web terminal show a live hint for which parameter comes next as you type."""
+    before_text = _before_text(line, cursor_pos)
+    try:
+        typed = shlex.split(before_text)
+    except ValueError:
+        typed = before_text.replace('"', "").replace("'", "").split()
+    return len(typed) - 1
 
 
 def get_map_info_panel_data(world: World) -> str:

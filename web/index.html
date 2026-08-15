@@ -111,6 +111,18 @@
   #cmd-ghost .suggestion { color: #666; }
   #cmd-input { color: #eee; outline: none; }
 
+  /* Live "which argument comes next" hint, shown below the input for recognized commands - the
+     full usage signature with the parameter the cursor is currently on picked out. */
+  #cmd-hint {
+    flex: 0 0 auto;
+    min-height: 14px;
+    padding: 3px 0 0 20px;
+    font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+    font-size: 11px;
+    color: #666;
+  }
+  #cmd-hint .hint-active { color: #eee; font-weight: 600; }
+
   /* Draggable divider between the terminal and map panes. */
   #pane-splitter {
     flex: 0 0 10px;
@@ -351,6 +363,7 @@
             <input type="text" id="cmd-input" autocomplete="off" disabled autofocus>
           </div>
         </form>
+        <div id="cmd-hint"></div>
       </section>
       <div id="pane-splitter"></div>
       <aside id="map-pane">
@@ -392,6 +405,7 @@
     const mapPaneEl = document.getElementById("map-pane");
     const helpOverlayEl = document.getElementById("help-overlay");
     const helpModalBodyEl = document.getElementById("help-modal-body");
+    const cmdHintEl = document.getElementById("cmd-hint");
 
     let pyodide;
     let game;
@@ -537,6 +551,19 @@
         ],
       },
     ];
+
+    // Derived from HELP_SECTIONS' own usage strings (e.g. "create <id> <x> <y>") rather than a
+    // second hand-maintained table, so the live "which argument comes next" hint below the
+    // input can never drift out of sync with the command reference the help modal already shows.
+    const COMMAND_PARAMS = {};
+    HELP_SECTIONS.forEach((section) => {
+      section.commands.forEach(([usage]) => {
+        const spaceIndex = usage.indexOf(" ");
+        const command = (spaceIndex === -1 ? usage : usage.slice(0, spaceIndex)).toLowerCase();
+        const params = usage.match(/<[^<>]+>|\[[^\[\]]+\]/g) || [];
+        COMMAND_PARAMS[command] = params;
+      });
+    });
 
     function escapeHtml(text) {
       return text.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
@@ -927,7 +954,7 @@ world = game.World()
       e.preventDefault();
       const line = inputEl.value;
       inputEl.value = "";
-      updateGhostSuggestion();
+      refreshInputHints();
       if (!line.trim()) return;
       history.push(line);
       historyIndex = history.length;
@@ -995,7 +1022,7 @@ world = game.World()
           lastTabPartial = partial;
         }
       }
-      updateGhostSuggestion();
+      refreshInputHints();
     }
 
     // Inline ghost-text suggestion: previews exactly what Tab would insert (single match, or
@@ -1031,6 +1058,37 @@ world = game.World()
       }
     }
 
+    // Live "which argument comes next" hint: shows the full usage signature for whatever
+    // command is typed so far, with the parameter the cursor is currently sitting in picked
+    // out - the parameter list comes from COMMAND_PARAMS (derived from HELP_SECTIONS above),
+    // and which one is "current" comes from main.py's get_current_arg_index so it always
+    // agrees with what tab-completion would offer there.
+    function updateArgHint() {
+      if (!game || !world) {
+        cmdHintEl.textContent = "";
+        return;
+      }
+      const value = inputEl.value;
+      const command = value.trim().split(/\s+/)[0].toLowerCase();
+      const params = COMMAND_PARAMS[command];
+      if (!value.trim() || !params || params.length === 0) {
+        cmdHintEl.textContent = "";
+        return;
+      }
+      const argIndex = game.get_current_arg_index(value, inputEl.selectionStart);
+      cmdHintEl.innerHTML =
+        escapeHtml(command) +
+        " " +
+        params
+          .map((p, i) => (i === argIndex ? `<span class="hint-active">${escapeHtml(p)}</span>` : escapeHtml(p)))
+          .join(" ");
+    }
+
+    function refreshInputHints() {
+      updateGhostSuggestion();
+      updateArgHint();
+    }
+
     inputEl.addEventListener("keydown", (e) => {
       if (e.key === "Tab") {
         e.preventDefault();
@@ -1044,7 +1102,7 @@ world = game.World()
           inputEl.value = history[historyIndex];
         }
         e.preventDefault();
-        updateGhostSuggestion();
+        refreshInputHints();
       } else if (e.key === "ArrowDown") {
         if (historyIndex < history.length - 1) {
           historyIndex++;
@@ -1054,14 +1112,14 @@ world = game.World()
           inputEl.value = "";
         }
         e.preventDefault();
-        updateGhostSuggestion();
+        refreshInputHints();
       } else {
         lastTabPartial = null;
       }
     });
 
-    inputEl.addEventListener("input", updateGhostSuggestion);
-    inputEl.addEventListener("click", updateGhostSuggestion);
+    inputEl.addEventListener("input", refreshInputHints);
+    inputEl.addEventListener("click", refreshInputHints);
 
     // Draggable divider: resizes #terminal-pane's flex-basis directly off the mouse position;
     // #map-pane (flex: 1) just takes whatever's left, and its own ResizeObserver (above)
