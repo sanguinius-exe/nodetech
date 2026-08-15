@@ -260,9 +260,24 @@
     const history = [];
     let historyIndex = 0;
 
+    // Appending via textContent += re-serializes the entire (ever-growing) output on every
+    // single call, and reading scrollHeight right after forces a synchronous layout reflow -
+    // fine for a few lines, but commands that print thousands of lines (e.g. `list` on a big
+    // world) turn that into thousands of full-page reflows in a tight loop and freeze the tab
+    // for tens of seconds. appendChild(textNode) is an O(1) DOM append instead of a full
+    // re-serialize, and batching the scroll update into one rAF per frame collapses however
+    // many synchronous appendOutput calls happen in between into a single reflow.
+    let scrollScheduled = false;
+
     function appendOutput(text) {
-      outputEl.textContent += text;
-      outputEl.scrollTop = outputEl.scrollHeight;
+      outputEl.appendChild(document.createTextNode(text));
+      if (!scrollScheduled) {
+        scrollScheduled = true;
+        requestAnimationFrame(() => {
+          outputEl.scrollTop = outputEl.scrollHeight;
+          scrollScheduled = false;
+        });
+      }
     }
 
     function shellQuote(s) {
