@@ -78,15 +78,29 @@
     border-top: 1px solid #35353a;
   }
   #cmd-form .prompt { color: #999; }
-  #cmd-input {
-    flex: 1;
-    background: transparent;
+
+  /* Ghost autocomplete: #cmd-ghost sits directly under #cmd-input, both absolutely
+     positioned with identical font metrics so their text lines up character-for-character.
+     The ghost's already-typed portion is rendered transparent (just reserving its width) so
+     only the suggested remainder - in a dimmer color - shows through past the real caret. */
+  #cmd-input-wrap { position: relative; flex: 1; height: 18px; }
+  #cmd-ghost, #cmd-input {
+    position: absolute;
+    inset: 0;
+    box-sizing: border-box;
+    margin: 0;
+    padding: 0;
     border: none;
-    outline: none;
-    color: #eee;
+    background: transparent;
     font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
     font-size: 13px;
+    line-height: 18px;
+    white-space: pre;
   }
+  #cmd-ghost { pointer-events: none; overflow: hidden; }
+  #cmd-ghost .typed { color: transparent; }
+  #cmd-ghost .suggestion { color: #666; }
+  #cmd-input { color: #eee; outline: none; }
 
   /* Draggable divider between the terminal and map panes. */
   #pane-splitter {
@@ -124,6 +138,69 @@
   #map-pane .map-placeholder { color: #999; font-size: 13px; margin: 0; }
   #map-scale-sizer { position: relative; overflow: hidden; flex-shrink: 0; }
   #map-scale-wrapper { transform-origin: top left; }
+
+  #help-overlay {
+    position: fixed;
+    inset: 0;
+    background: rgba(0, 0, 0, 0.6);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    z-index: 10;
+  }
+  #help-overlay.hidden { display: none; }
+  #help-modal {
+    background: #26262a;
+    border-radius: 8px;
+    width: min(640px, 90vw);
+    max-height: 80vh;
+    display: flex;
+    flex-direction: column;
+    overflow: hidden;
+  }
+  #help-modal-header {
+    flex: 0 0 auto;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 14px 20px;
+    border-bottom: 1px solid #35353a;
+  }
+  #help-modal-header h2 { margin: 0; font-size: 15px; font-weight: 600; }
+  #help-close-btn {
+    background: transparent;
+    border: none;
+    color: #999;
+    font-size: 20px;
+    line-height: 1;
+    padding: 0 4px;
+    cursor: pointer;
+  }
+  #help-close-btn:hover { color: #eee; }
+  #help-modal-body { flex: 1; overflow-y: auto; padding: 4px 20px 16px; font-size: 13px; }
+  #help-modal-body h3 {
+    font-size: 11px;
+    font-weight: 600;
+    color: #999;
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+    margin: 18px 0 8px;
+  }
+  #help-modal-body h3:first-child { margin-top: 14px; }
+  .help-row {
+    display: flex;
+    gap: 16px;
+    align-items: baseline;
+    padding: 6px 0;
+    border-bottom: 1px solid #35353a;
+  }
+  .help-row:last-child { border-bottom: none; }
+  .help-cmd {
+    flex: 0 0 auto;
+    font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+    color: #eee;
+  }
+  .help-desc { color: #999; }
 </style>
 </head>
 <body>
@@ -141,7 +218,10 @@
       <div id="output"></div>
       <form id="cmd-form">
         <span class="prompt">&gt;</span>
-        <input type="text" id="cmd-input" autocomplete="off" disabled autofocus>
+        <div id="cmd-input-wrap">
+          <div id="cmd-ghost" aria-hidden="true"><span class="typed"></span><span class="suggestion"></span></div>
+          <input type="text" id="cmd-input" autocomplete="off" disabled autofocus>
+        </div>
       </form>
     </section>
     <div id="pane-splitter"></div>
@@ -150,15 +230,29 @@
     </aside>
   </main>
 
+  <div id="help-overlay" class="hidden">
+    <div id="help-modal">
+      <div id="help-modal-header">
+        <h2>Commands</h2>
+        <button id="help-close-btn" type="button" aria-label="Close">&times;</button>
+      </div>
+      <div id="help-modal-body"></div>
+    </div>
+  </div>
+
   <script src="https://cdn.jsdelivr.net/pyodide/v0.26.2/full/pyodide.js"></script>
   <script>
     const outputEl = document.getElementById("output");
     const formEl = document.getElementById("cmd-form");
     const inputEl = document.getElementById("cmd-input");
+    const ghostTypedEl = document.querySelector("#cmd-ghost .typed");
+    const ghostSuggestionEl = document.querySelector("#cmd-ghost .suggestion");
     const loadFileEl = document.getElementById("load-file");
     const downloadBtn = document.getElementById("download-save-btn");
     const statusEl = document.getElementById("status");
     const mapPaneEl = document.getElementById("map-pane");
+    const helpOverlayEl = document.getElementById("help-overlay");
+    const helpModalBodyEl = document.getElementById("help-modal-body");
 
     let pyodide;
     let game;
@@ -174,6 +268,134 @@
     function shellQuote(s) {
       return '"' + String(s).replace(/([\\"])/g, "\\$1") + '"';
     }
+
+    // Mirrors README.md's command tables. Kept here rather than generated from main.py's
+    // COMMAND_NAMES/ARG_COMPLETIONS because those only carry names and argument *kinds*, not
+    // human descriptions - there's no single source of truth to generate this from.
+    const HELP_SECTIONS = [
+      {
+        title: "General",
+        commands: [
+          ["help", "Show this command reference"],
+          ["quit / exit", "Exit the session"],
+        ],
+      },
+      {
+        title: "Save / load",
+        commands: [
+          ["new-world <name> <width> <height> [start_year]", "Create a fresh world"],
+          ["open <name or path>", "Load a world, replacing the current one"],
+          ["list-worlds", "List all saved worlds"],
+          ["rename-world <old_name> <new_name>", "Rename a saved world"],
+          ["save [name or path]", "Save the world to a file"],
+        ],
+      },
+      {
+        title: "Countries",
+        commands: [
+          ["create-country <name> [government]", "Create a new country"],
+          ["view-country <name>", "View a country's GDP, population, growth rates, division count"],
+          ["list-countries", "List all countries"],
+          ["setgovernment <country> <government>", "Set a country's government type"],
+          ["country-status <country>", "Show a country's GDP, population, and other stats"],
+        ],
+      },
+      {
+        title: "Nodes",
+        commands: [
+          ["create <id> <x> <y>", "Create a new node at a grid position"],
+          ["list", "List all nodes, with their positions"],
+          ["map", "Generate an interactive map and open/render it"],
+          ["view <id>", "View a node's full details, including supply status"],
+          ["connect <id1> <id2>", "Connect two nodes"],
+          ["disconnect <id1> <id2>", "Remove the connection between two nodes"],
+          ["build-railroad <id1> <id2>", "Tag an existing connection as a railroad"],
+          ["remove-railroad <id1> <id2>", "Remove the railroad tag from a connection"],
+          ["setcountry <id> <country>", "Set a node's controlling country"],
+          ["setterrain <id> <terrain>", "Set terrain type"],
+          ["setpopulation <id> <population>", "Set a node's population"],
+          ["setpopgrowth <id> <rate>", "Set a node's population growth rate"],
+          ["seteconomy <id> <output>", "Set a node's economic output"],
+          ["build <id> <building>", "Enable a building"],
+          ["unbuild <id> <building>", "Disable a building"],
+          ["addresource <id> <resource>", "Add a resource to a node"],
+          ["removeresource <id> <resource>", "Remove a resource from a node"],
+          ["build-extraction <id> <site>", "Build an extraction site (needs the matching resource)"],
+          ["unbuild-extraction <id> <site>", "Remove an extraction site"],
+        ],
+      },
+      {
+        title: "Military",
+        commands: [
+          ["deploy <id> <country> <name> <type> <manpower> <supply>", "Create and deploy a division"],
+          ["create-division <country> <name> <type> <manpower> <supply>", "Create a division in reserve"],
+          [
+            "create-airforce-division <country> <name> <manpower> <supply> <aircraft_type> <equip> <count> <range>",
+            "Create an air force division in reserve",
+          ],
+          [
+            "deploy-airforce <id> <country> <name> <manpower> <supply> <aircraft_type> <equip> <count> <range>",
+            "Create and deploy an air force division",
+          ],
+          ["deploy-reserve <country> <name> <id>", "Deploy an existing reserve division"],
+          ["move-division <country> <name> <destination_id>", "Move an already-deployed division to another node"],
+          ["country-divisions <country>", "List all of a country's divisions, deployed and in reserve"],
+        ],
+      },
+      {
+        title: "World & simulation",
+        commands: [
+          ["world status", "List every country with its GDP and population"],
+          ["world divisions", "List every country's divisions, grouped by country"],
+          ["projections", "List every country's growth rates (calculated live)"],
+          ["advance-year", "Advance the game by one year"],
+          ["year", "Show the current year and years since the world started"],
+          ["forceupdate", "Recalculate GDP/population from nodes without advancing the year"],
+        ],
+      },
+      {
+        title: "Reference lists",
+        commands: [
+          ["buildings", "List available building types"],
+          ["resources", "List available resource types"],
+          ["extraction-sites", "List available extraction site types"],
+          ["terrains", "List available terrain types"],
+          ["division-types", "List available division types"],
+          ["governments", "List available government types"],
+        ],
+      },
+    ];
+
+    function escapeHtml(text) {
+      return text.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+    }
+
+    function openHelpModal() {
+      helpModalBodyEl.innerHTML = HELP_SECTIONS.map((section) => {
+        const rows = section.commands
+          .map(
+            ([cmd, desc]) =>
+              `<div class="help-row"><span class="help-cmd">${escapeHtml(cmd)}</span>` +
+              `<span class="help-desc">${escapeHtml(desc)}</span></div>`
+          )
+          .join("");
+        return `<h3>${escapeHtml(section.title)}</h3>${rows}`;
+      }).join("");
+      helpOverlayEl.classList.remove("hidden");
+    }
+
+    function closeHelpModal() {
+      helpOverlayEl.classList.add("hidden");
+      inputEl.focus();
+    }
+
+    document.getElementById("help-close-btn").addEventListener("click", closeHelpModal);
+    helpOverlayEl.addEventListener("click", (e) => {
+      if (e.target === helpOverlayEl) closeHelpModal();
+    });
+    document.addEventListener("keydown", (e) => {
+      if (e.key === "Escape" && !helpOverlayEl.classList.contains("hidden")) closeHelpModal();
+    });
 
     // Splices the map's generated page directly into #map-pane instead of opening it as a
     // separate document: the map's own <style> (shared .map-page/.tile/.panel/... rules) gets
@@ -290,6 +512,10 @@ world = game.World()
 
     function runLine(line) {
       appendOutput("> " + line + "\n");
+      if (line.trim().split(/\s+/)[0].toLowerCase() === "help") {
+        openHelpModal();
+        return;
+      }
       let keepGoing = true;
       try {
         keepGoing = game.run_command(world, line);
@@ -306,19 +532,120 @@ world = game.World()
       e.preventDefault();
       const line = inputEl.value;
       inputEl.value = "";
+      updateGhostSuggestion();
       if (!line.trim()) return;
       history.push(line);
       historyIndex = history.length;
       runLine(line);
     });
 
+    // Tab-completion, driven by main.py's get_completions(world, line, cursor_pos) - the same
+    // COMMAND_NAMES/ARG_COMPLETIONS tables the local CLI's readline completer uses, just called
+    // directly instead of through readline's index-by-index protocol. Behaves like a regular
+    // shell: one match completes it (plus a trailing space), several matches fill in as much
+    // of their common prefix as possible, and pressing Tab again with nothing left to add
+    // lists the candidates in the output pane.
+    let lastTabPartial = null;
+
+    function currentPartialWord() {
+      const before = inputEl.value.slice(0, inputEl.selectionStart);
+      return /\S*$/.exec(before)[0];
+    }
+
+    function longestCommonPrefix(strings) {
+      let prefix = strings[0];
+      for (let i = 1; i < strings.length; i++) {
+        while (!strings[i].toLowerCase().startsWith(prefix.toLowerCase())) {
+          prefix = prefix.slice(0, -1);
+          if (!prefix) return "";
+        }
+      }
+      return prefix;
+    }
+
+    function replaceCurrentWord(replacement) {
+      const cursorPos = inputEl.selectionStart;
+      const before = inputEl.value.slice(0, cursorPos);
+      const after = inputEl.value.slice(cursorPos);
+      const partial = /\S*$/.exec(before)[0];
+      const newBefore = before.slice(0, before.length - partial.length) + replacement;
+      inputEl.value = newBefore + after;
+      inputEl.setSelectionRange(newBefore.length, newBefore.length);
+    }
+
+    function handleTabComplete() {
+      if (!game || !world) return;
+      const partial = currentPartialWord();
+      const matchesProxy = game.get_completions(world, inputEl.value, inputEl.selectionStart);
+      const matches = matchesProxy.toJs();
+      matchesProxy.destroy();
+
+      if (matches.length === 0) {
+        lastTabPartial = null;
+      } else if (matches.length === 1) {
+        replaceCurrentWord(matches[0] + " ");
+        lastTabPartial = null;
+      } else {
+        const lcp = longestCommonPrefix(matches);
+        if (lcp.length > partial.length) {
+          replaceCurrentWord(lcp);
+          lastTabPartial = null;
+        } else if (lastTabPartial === partial) {
+          appendOutput("\n" + matches.join("  ") + "\n");
+        } else {
+          lastTabPartial = partial;
+        }
+      }
+      updateGhostSuggestion();
+    }
+
+    // Inline ghost-text suggestion: previews exactly what Tab would insert (single match, or
+    // the longest common prefix across several), dimmed, right after the cursor - but only
+    // when the cursor's at the end of the line, since a mid-line suggestion has nowhere
+    // sensible to render. Right arrow at the end of the line accepts it, same as Tab.
+    function updateGhostSuggestion() {
+      const value = inputEl.value;
+      const cursorPos = inputEl.selectionStart;
+      if (!game || !world || !value || cursorPos !== value.length) {
+        ghostTypedEl.textContent = "";
+        ghostSuggestionEl.textContent = "";
+        return;
+      }
+      const partial = currentPartialWord();
+      const matchesProxy = game.get_completions(world, value, cursorPos);
+      const matches = matchesProxy.toJs();
+      matchesProxy.destroy();
+
+      let suggestion = "";
+      if (matches.length === 1) {
+        suggestion = matches[0];
+      } else if (matches.length > 1) {
+        suggestion = longestCommonPrefix(matches);
+      }
+
+      if (suggestion.length > partial.length) {
+        ghostTypedEl.textContent = value;
+        ghostSuggestionEl.textContent = suggestion.slice(partial.length);
+      } else {
+        ghostTypedEl.textContent = "";
+        ghostSuggestionEl.textContent = "";
+      }
+    }
+
     inputEl.addEventListener("keydown", (e) => {
-      if (e.key === "ArrowUp") {
+      if (e.key === "Tab") {
+        e.preventDefault();
+        handleTabComplete();
+      } else if (e.key === "ArrowRight" && ghostSuggestionEl.textContent && inputEl.selectionStart === inputEl.value.length) {
+        e.preventDefault();
+        handleTabComplete();
+      } else if (e.key === "ArrowUp") {
         if (historyIndex > 0) {
           historyIndex--;
           inputEl.value = history[historyIndex];
         }
         e.preventDefault();
+        updateGhostSuggestion();
       } else if (e.key === "ArrowDown") {
         if (historyIndex < history.length - 1) {
           historyIndex++;
@@ -328,8 +655,14 @@ world = game.World()
           inputEl.value = "";
         }
         e.preventDefault();
+        updateGhostSuggestion();
+      } else {
+        lastTabPartial = null;
       }
     });
+
+    inputEl.addEventListener("input", updateGhostSuggestion);
+    inputEl.addEventListener("click", updateGhostSuggestion);
 
     // Draggable divider: resizes #terminal-pane's flex-basis directly off the mouse position;
     // #map-pane (flex: 1) just takes whatever's left, and its own ResizeObserver (above)

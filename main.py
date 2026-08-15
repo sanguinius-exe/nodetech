@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 import shlex
 import webbrowser
 from pathlib import Path
@@ -51,6 +52,7 @@ COMMAND_NAMES = sorted(
         "create-airforce-division",
         "deploy-airforce",
         "deploy-reserve",
+        "move-division",
         "buildings",
         "resources",
         "extraction-sites",
@@ -100,6 +102,7 @@ ARG_COMPLETIONS: dict[str, list[str | list[str]]] = {
     "create-airforce-division": ["country"],
     "deploy-airforce": ["node", "country"],
     "deploy-reserve": ["country", [], "node"],
+    "move-division": ["country", [], "node"],
     "create-country": [[], [g.name.lower() for g in GovernmentType]],
     "view-country": ["country"],
     "setgovernment": ["country", [g.name.lower() for g in GovernmentType]],
@@ -993,6 +996,47 @@ def cmd_deploy_reserve(world: World, args: list[str]) -> None:
     print(f"Deployed reserve division '{name}' for {country_name} to '{node_id}'.")
 
 
+def cmd_move_division(world: World, args: list[str]) -> None:
+    if len(args) != 3:
+        print("Usage: move-division <country> <name> <destination_id>")
+        return
+    country_name, name, destination_id = args
+    if world.get_country(country_name) is None:
+        print(f"No such country '{country_name}'.")
+        return
+    destination = world.get_node(destination_id)
+    if destination is None:
+        print(f"No such node '{destination_id}'.")
+        return
+    division = find_division_by_name(world, country_name, name)
+    if division is None:
+        print(f"'{country_name}' has no division named '{name}'.")
+        return
+    if division.location is None:
+        print(f"'{name}' is in reserve, not deployed - use 'deploy-reserve' to send it somewhere first.")
+        return
+    if division.location == destination_id:
+        print(f"'{name}' is already at '{destination_id}'.")
+        return
+
+    origin_id = division.location
+    origin = world.get_node(origin_id)
+    if origin is not None:
+        deployment = next((d for d in origin.military_deployments if d.country == country_name), None)
+        if deployment is not None and division in deployment.divisions:
+            deployment.divisions.remove(division)
+            if not deployment.divisions:
+                origin.military_deployments.remove(deployment)
+
+    new_deployment = next((d for d in destination.military_deployments if d.country == country_name), None)
+    if new_deployment is None:
+        new_deployment = MilitaryDeployment(country=country_name)
+        destination.military_deployments.append(new_deployment)
+    new_deployment.divisions.append(division)
+    division.location = destination_id
+    print(f"Moved '{name}' from '{origin_id}' to '{destination_id}'.")
+
+
 def refresh_country_stats(world: World) -> None:
     for country in world.countries.values():
         country.update_economic_output(world.nodes)
@@ -1171,6 +1215,8 @@ def run_command(world: World, raw: str) -> bool:
         cmd_deploy_airforce(world, args)
     elif command == "deploy-reserve":
         cmd_deploy_reserve(world, args)
+    elif command == "move-division":
+        cmd_move_division(world, args)
     elif command == "buildings":
         print(", ".join(b.name for b in BuildingType))
     elif command == "resources":
@@ -1231,34 +1277,52 @@ def run_command(world: World, raw: str) -> bool:
     return True
 
 
+def _completion_options(world: World, before_text: str) -> list[str]:
+    """The raw candidate pool for the word that comes right after `before_text` - shared by
+    make_completer() (readline, for the local CLI) and get_completions() (for frontends that
+    aren't readline-driven, like the web terminal), so both stay in sync with COMMAND_NAMES/
+    ARG_COMPLETIONS automatically instead of maintaining two copies of this lookup."""
+    try:
+        typed = shlex.split(before_text)
+    except ValueError:
+        # an unterminated quote is being typed right now; best-effort fallback
+        typed = before_text.replace('"', "").replace("'", "").split()
+
+    if not typed:
+        return COMMAND_NAMES
+    command = typed[0].lower()
+    arg_index = len(typed) - 1
+    spec = ARG_COMPLETIONS.get(command)
+    kind = spec[arg_index] if spec and arg_index < len(spec) else []
+    if kind == "node":
+        return list(world.nodes.keys())
+    elif kind == "country":
+        return list(world.countries.keys())
+    elif kind == "world_name":
+        return database.list_worlds()
+    elif isinstance(kind, list):
+        return kind
+    return []
+
+
+def get_completions(world: World, line: str, cursor_pos: int) -> list[str]:
+    """Every completion candidate for the partial word ending at cursor_pos in `line`, sorted
+    and deduplicated. Frontend-agnostic (no readline dependency) for use by, e.g., the web
+    terminal, which drives this off an <input>'s value/selectionStart instead."""
+    prefix_text = line[:cursor_pos]
+    word_match = re.search(r"\S*$", prefix_text)
+    partial = word_match.group(0) if word_match else ""
+    before_text = prefix_text[: len(prefix_text) - len(partial)]
+    partial = partial.lstrip("\"'")
+    options = _completion_options(world, before_text)
+    return sorted({o for o in options if o.lower().startswith(partial.lower())})
+
+
 def make_completer(world: World):
     def completer(text: str, state: int) -> str | None:
         buffer = readline.get_line_buffer()
         prefix_text = buffer[: readline.get_begidx()]
-        try:
-            typed = shlex.split(prefix_text)
-        except ValueError:
-            # an unterminated quote is being typed right now; best-effort fallback
-            typed = prefix_text.replace('"', "").replace("'", "").split()
-
-        if not typed:
-            options: list[str] = COMMAND_NAMES
-        else:
-            command = typed[0].lower()
-            arg_index = len(typed) - 1
-            spec = ARG_COMPLETIONS.get(command)
-            kind = spec[arg_index] if spec and arg_index < len(spec) else []
-            if kind == "node":
-                options = list(world.nodes.keys())
-            elif kind == "country":
-                options = list(world.countries.keys())
-            elif kind == "world_name":
-                options = database.list_worlds()
-            elif isinstance(kind, list):
-                options = kind
-            else:
-                options = []
-
+        options = _completion_options(world, prefix_text)
         matches = [o for o in options if o.lower().startswith(text.lower())]
         return matches[state] if state < len(matches) else None
 
