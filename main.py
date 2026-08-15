@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import re
 import shlex
 import webbrowser
@@ -1316,6 +1317,81 @@ def get_completions(world: World, line: str, cursor_pos: int) -> list[str]:
     partial = partial.lstrip("\"'")
     options = _completion_options(world, before_text)
     return sorted({o for o in options if o.lower().startswith(partial.lower())})
+
+
+def get_map_info_panel_data(world: World) -> str:
+    """A JSON-serializable summary for the web terminal's info panel: world-level stats plus
+    one row per country (name, government, live GDP/population/growth, node and division
+    counts). Returned as a JSON string, not a raw dict, so Pyodide callers get a plain JS
+    object via JSON.parse instead of having to work with a PyProxy."""
+    countries = []
+    for country in world.countries.values():
+        countries.append(
+            {
+                "name": country.name,
+                "government": country.government_type.name,
+                "gdp": country.calculate_economic_output(world.nodes),
+                "population": country.calculate_population(world.nodes),
+                "growth": country.calculate_economic_growth_rate(world.nodes),
+                "popGrowth": country.calculate_projected_population_growth_rate(world.nodes),
+                "nodes": len(country.nodes),
+                "divisions": len(get_country_divisions(world.nodes, country.name)) + len(country.reserve_divisions),
+            }
+        )
+    save_name = Path(world.save_path).stem if world.save_path else "unsaved world"
+    return json.dumps(
+        {
+            "name": save_name,
+            "year": world.year,
+            "yearsElapsed": world.year - world.start_year,
+            "width": world.width,
+            "height": world.height,
+            "nodeCount": len(world.nodes),
+            "countryCount": len(world.countries),
+            "countries": countries,
+        }
+    )
+
+
+def get_tile_info(world: World, node_id: str) -> str:
+    """A JSON-serializable full detail dump for one node - everything `view` would show, for
+    the web terminal's hover panel. Returns JSON "null" if the node doesn't exist."""
+    node = world.nodes.get(node_id)
+    if node is None:
+        return json.dumps(None)
+    return json.dumps(
+        {
+            "id": node.id,
+            "x": node.x,
+            "y": node.y,
+            "country": node.country,
+            "terrain": node.terrain.name,
+            "connectedTiles": node.connected_tiles,
+            "buildings": [b.name for b in node.get_available_buildings()],
+            "resources": [r.name for r in node.get_available_resources()],
+            "extractionSites": [s.name for s in node.get_available_extraction_sites()],
+            "economicOutput": node.economic_output,
+            "economicGrowth": node.calculate_economic_growth_rate(),
+            "population": node.population,
+            "populationGrowth": node.population_growth_rate,
+            "projectedPopulationGrowth": node.calculate_projected_population_growth_rate(),
+            "deployments": [
+                {
+                    "country": dep.country,
+                    "divisions": [
+                        {
+                            "name": d.name,
+                            "type": d.division_type.name,
+                            "manpower": d.manpower,
+                            "morale": d.morale,
+                        }
+                        for d in dep.divisions
+                    ],
+                }
+                for dep in node.military_deployments
+            ],
+        }
+    )
 
 
 def make_completer(world: World):

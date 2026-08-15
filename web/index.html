@@ -48,8 +48,17 @@
     flex: 1 1 auto;
     min-height: 0;
     display: flex;
+    flex-direction: column;
     padding: 24px;
     box-sizing: border-box;
+  }
+
+  /* Terminal + map side by side, on top of the full-width info panel below. */
+  #top-row {
+    flex: 1 1 auto;
+    min-height: 0;
+    display: flex;
+    align-items: stretch;
   }
 
   #terminal-pane {
@@ -139,6 +148,124 @@
   #map-scale-sizer { position: relative; overflow: hidden; flex-shrink: 0; }
   #map-scale-wrapper { transform-origin: top left; }
 
+  /* Draggable divider between the top row (terminal + map) and the info panel below - resizes
+     #info-pane's flex-basis directly off the mouse position, mirroring #pane-splitter's
+     horizontal-resize logic but on the vertical axis. */
+  #row-splitter {
+    flex: 0 0 10px;
+    margin: 8px 0;
+    cursor: row-resize;
+    position: relative;
+  }
+  #row-splitter::after {
+    content: "";
+    position: absolute;
+    left: 0;
+    right: 0;
+    top: 4px;
+    height: 2px;
+    background: #35353a;
+    border-radius: 1px;
+  }
+  #row-splitter:hover::after, #row-splitter.dragging::after { background: #55555c; }
+
+  /* A self-contained info panel spanning the full width under the terminal and map - not
+     part of the map's own scaling, fed by live get_map_info_panel_data()/get_tile_info()
+     calls (see refreshInfoPanel/renderTileSection) rather than reusing the map's own generated
+     .panel/.year-badge, so it can show more than what's baked into the map's markup at render
+     time and stay organized into clearly separated sections instead of one cramped list. */
+  #info-pane {
+    flex: 0 0 260px;
+    min-height: 80px;
+    display: flex;
+    flex-direction: column;
+    background: #26262a;
+    border-radius: 8px;
+    overflow: hidden;
+  }
+  #info-pane .info-placeholder { color: #999; font-size: 13px; margin: auto; }
+
+  #info-header {
+    flex: 0 0 auto;
+    display: flex;
+    align-items: baseline;
+    justify-content: space-between;
+    padding: 12px 16px;
+    border-bottom: 1px solid #35353a;
+  }
+  #info-header #info-name { font-size: 14px; font-weight: 600; }
+  #info-header #info-year { font-size: 12px; color: #999; }
+
+  #info-body { flex: 1; min-height: 0; display: flex; align-items: stretch; }
+  .info-section { padding: 14px 16px; overflow-y: auto; box-sizing: border-box; }
+  .info-section h3 {
+    margin: 0 0 10px;
+    font-size: 11px;
+    font-weight: 600;
+    color: #999;
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+  }
+  .info-divider { flex: 0 0 1px; background: #35353a; margin: 14px 0; }
+
+  #info-section-world { flex: 0 0 140px; display: flex; flex-direction: column; gap: 12px; }
+  .info-stat { display: flex; flex-direction: column; gap: 2px; }
+  .info-stat-label { font-size: 11px; color: #999; text-transform: uppercase; letter-spacing: 0.04em; }
+  .info-stat-value { font-size: 15px; font-weight: 600; }
+
+  #info-section-countries { flex: 1; min-width: 0; display: flex; flex-direction: column; }
+  #info-country-list { display: flex; flex-wrap: wrap; align-content: flex-start; gap: 10px; overflow-y: auto; }
+  .info-country-card {
+    flex: 0 0 auto;
+    min-width: 170px;
+    background: #1c1c1f;
+    border-radius: 6px;
+    padding: 10px 12px;
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+  }
+  .info-country-card-header { display: flex; align-items: center; gap: 8px; }
+  .info-country-card-header .swatch { width: 10px; height: 10px; border-radius: 2px; flex-shrink: 0; }
+  .info-country-card-name { font-weight: 600; font-size: 14px; }
+  .info-country-card-gov { font-size: 11px; color: #999; text-transform: uppercase; letter-spacing: 0.04em; }
+  .info-country-card-stats { display: flex; flex-wrap: wrap; gap: 4px 10px; font-size: 12px; color: #999; }
+  .info-country-card-stats b { color: #eee; font-weight: 600; }
+
+  #info-section-tile { flex: 0 0 240px; display: flex; flex-direction: column; }
+  .info-tile-stat {
+    display: flex;
+    justify-content: space-between;
+    gap: 10px;
+    font-size: 12px;
+    padding: 4px 0;
+    border-bottom: 1px solid #35353a;
+  }
+  .info-tile-stat:last-child { border-bottom: none; }
+  .info-tile-stat span:first-child { color: #999; flex-shrink: 0; }
+  .info-tile-stat span:last-child { text-align: right; }
+  .info-tile-empty { color: #999; font-size: 13px; }
+  .info-tile-header { display: flex; align-items: center; justify-content: space-between; margin-bottom: 10px; }
+  .info-tile-header h3 { margin: 0; }
+  .info-tile-pinned {
+    font-size: 10px;
+    font-weight: 400;
+    text-transform: none;
+    letter-spacing: normal;
+    color: #999;
+  }
+  #info-tile-close {
+    flex: 0 0 auto;
+    background: transparent;
+    border: none;
+    color: #999;
+    font-size: 16px;
+    line-height: 1;
+    padding: 0 2px;
+    cursor: pointer;
+  }
+  #info-tile-close:hover { color: #eee; }
+
   #help-overlay {
     position: fixed;
     inset: 0;
@@ -214,19 +341,31 @@
     <span id="status">Loading Python runtime...</span>
   </header>
   <main class="app-layout">
-    <section id="terminal-pane">
-      <div id="output"></div>
-      <form id="cmd-form">
-        <span class="prompt">&gt;</span>
-        <div id="cmd-input-wrap">
-          <div id="cmd-ghost" aria-hidden="true"><span class="typed"></span><span class="suggestion"></span></div>
-          <input type="text" id="cmd-input" autocomplete="off" disabled autofocus>
-        </div>
-      </form>
-    </section>
-    <div id="pane-splitter"></div>
-    <aside id="map-pane">
-      <p class="map-placeholder">Run the <code>map</code> command to render the world here.</p>
+    <div id="top-row">
+      <section id="terminal-pane">
+        <div id="output"></div>
+        <form id="cmd-form">
+          <span class="prompt">&gt;</span>
+          <div id="cmd-input-wrap">
+            <div id="cmd-ghost" aria-hidden="true"><span class="typed"></span><span class="suggestion"></span></div>
+            <input type="text" id="cmd-input" autocomplete="off" disabled autofocus>
+          </div>
+        </form>
+      </section>
+      <div id="pane-splitter"></div>
+      <aside id="map-pane">
+        <p class="map-placeholder">Run the <code>map</code> command to render the world here.</p>
+      </aside>
+    </div>
+    <div id="row-splitter"></div>
+    <aside id="info-pane">
+      <div id="info-header">
+        <span id="info-name">nodetech</span>
+        <span id="info-year"></span>
+      </div>
+      <div id="info-body">
+        <p class="info-placeholder">Run the <code>map</code> command to see world &amp; country info here.</p>
+      </div>
     </aside>
   </main>
 
@@ -321,11 +460,9 @@
           ["create <id> <x> <y>", "Create a new node at a grid position"],
           ["list", "List all nodes, with their positions"],
           ["map", "Generate an interactive map and open/render it"],
-          ["view <id>", "View a node's full details, including supply status"],
+          ["view <id>", "View a node's full details"],
           ["connect <id1> <id2>", "Connect two nodes"],
           ["disconnect <id1> <id2>", "Remove the connection between two nodes"],
-          ["build-railroad <id1> <id2>", "Tag an existing connection as a railroad"],
-          ["remove-railroad <id1> <id2>", "Remove the railroad tag from a connection"],
           ["setcountry <id> <country>", "Set a node's controlling country"],
           ["setterrain <id> <terrain>", "Set terrain type"],
           ["setpopulation <id> <population>", "Set a node's population"],
@@ -433,25 +570,29 @@
       const sourceStyle = doc.querySelector("style");
       styleEl.textContent = sourceStyle ? sourceStyle.textContent : "";
 
+      // The map's own <script> (hover-panel wiring) and its .year-badge/.panel are only used
+      // by the standalone page the CLI writes - the web terminal drives its own, richer info
+      // panel instead (see refreshInfoPanel/renderTileSection below), fed by live
+      // get_map_info_panel_data()/get_tile_info() calls rather than data baked into the map's
+      // markup at render time, so none of the three are needed here.
       const scriptEl = doc.querySelector("script");
-      const scriptText = scriptEl ? scriptEl.textContent : "";
       if (scriptEl) scriptEl.remove();
+      const yearBadgeEl = doc.querySelector(".year-badge");
+      if (yearBadgeEl) yearBadgeEl.remove();
+      const panelEl = doc.querySelector(".panel");
+      if (panelEl) panelEl.remove();
 
       mapPaneEl.innerHTML = '<div id="map-scale-sizer"><div id="map-scale-wrapper" class="map-page"></div></div>';
       const wrapper = document.getElementById("map-scale-wrapper");
       wrapper.innerHTML = doc.body.innerHTML;
-
-      if (scriptText) {
-        const s = document.createElement("script");
-        s.textContent = scriptText;
-        wrapper.appendChild(s);
-      }
 
       // Measure the map's real, unscaled size once (before any transform is applied) and
       // cache it - fitMapToPane() only needs to recompute the scale factor after this, not
       // re-measure, so window/splitter resizing stays smooth instead of thrashing layout.
       mapContentSize = { width: wrapper.scrollWidth, height: wrapper.scrollHeight };
       fitMapToPane();
+
+      refreshInfoPanel();
     }
 
     function fitMapToPane() {
@@ -464,12 +605,212 @@
         0.05,
         Math.min(paneRect.width / mapContentSize.width, paneRect.height / mapContentSize.height, 4)
       );
+      // Pin the wrapper's own layout box to its natural (unscaled) size - without this, a
+      // plain block div has no width of its own and inherits the sizer's already-*scaled-down*
+      // width instead, so its content (the map grid, the legend's flex-wrap) gets laid out and
+      // wrapped as if squeezed into that tiny box *before* the transform below ever applies,
+      // instead of being laid out at full size and only shrunk visually.
+      wrapper.style.width = mapContentSize.width + "px";
+      wrapper.style.height = mapContentSize.height + "px";
       wrapper.style.transform = `scale(${scale})`;
       sizer.style.width = mapContentSize.width * scale + "px";
       sizer.style.height = mapContentSize.height * scale + "px";
     }
 
     new ResizeObserver(() => fitMapToPane()).observe(mapPaneEl);
+
+    // Same 12-color palette assign_country_colors() in main.py cycles through, in the same
+    // order (world.countries.values() / get_map_info_panel_data()'s countries list both
+    // follow dict insertion order) - keeps a country's swatch here matching its tile color.
+    const COUNTRY_COLORS = [
+      "#e74c3c", "#2ecc71", "#f1c40f", "#3498db", "#9b59b6", "#1abc9c",
+      "#ff8a80", "#8affab", "#fff176", "#82b1ff", "#ea80fc", "#84ffff",
+    ];
+
+    function formatCompact(n) {
+      if (n >= 1e9) return (n / 1e9).toFixed(1) + "B";
+      if (n >= 1e6) return (n / 1e6).toFixed(1) + "M";
+      if (n >= 1e3) return (n / 1e3).toFixed(1) + "K";
+      return Math.round(n).toString();
+    }
+
+    function infoStatHtml(label, value) {
+      return (
+        '<div class="info-stat"><span class="info-stat-label">' +
+        escapeHtml(label) +
+        '</span><span class="info-stat-value">' +
+        escapeHtml(String(value)) +
+        "</span></div>"
+      );
+    }
+
+    function infoTileStatHtml(label, value) {
+      return (
+        '<div class="info-tile-stat"><span>' +
+        escapeHtml(label) +
+        "</span><span>" +
+        escapeHtml(String(value)) +
+        "</span></div>"
+      );
+    }
+
+    // Rebuilds #info-body's World/Countries/Selected-Tile layout from a fresh
+    // get_map_info_panel_data() call - run once whenever `map` (re-)renders, so it reflects
+    // the world state at that point the same way the map grid itself does.
+    function refreshInfoPanel() {
+      if (!game || !world) return;
+      pinnedTileId = null;
+      const data = JSON.parse(game.get_map_info_panel_data(world));
+
+      document.getElementById("info-name").textContent = data.name;
+      const yearLabel =
+        "Year " + data.year + " (" + data.yearsElapsed + (data.yearsElapsed === 1 ? " year" : " years") + " elapsed)";
+      document.getElementById("info-year").textContent = yearLabel;
+
+      const countryCards = data.countries
+        .map((c, i) => {
+          const color = COUNTRY_COLORS[i % COUNTRY_COLORS.length];
+          return (
+            '<div class="info-country-card">' +
+            '<div class="info-country-card-header"><span class="swatch" style="background:' +
+            color +
+            '"></span><span class="info-country-card-name">' +
+            escapeHtml(c.name) +
+            "</span></div>" +
+            '<div class="info-country-card-gov">' +
+            escapeHtml(c.government) +
+            "</div>" +
+            '<div class="info-country-card-stats">' +
+            "<span>GDP <b>" +
+            formatCompact(c.gdp) +
+            "</b> (" +
+            (c.growth * 100).toFixed(1) +
+            "%)</span>" +
+            "<span>Pop <b>" +
+            formatCompact(c.population) +
+            "</b> (" +
+            (c.popGrowth * 100).toFixed(1) +
+            "%)</span>" +
+            "<span>Nodes <b>" +
+            c.nodes +
+            "</b></span>" +
+            "<span>Divisions <b>" +
+            c.divisions +
+            "</b></span>" +
+            "</div></div>"
+          );
+        })
+        .join("");
+
+      document.getElementById("info-body").innerHTML =
+        '<div id="info-section-world" class="info-section">' +
+        "<h3>World</h3>" +
+        infoStatHtml("Nodes", data.nodeCount) +
+        infoStatHtml("Countries", data.countryCount) +
+        infoStatHtml("Grid", data.width + " x " + data.height) +
+        "</div>" +
+        '<div class="info-divider"></div>' +
+        '<div id="info-section-countries" class="info-section">' +
+        "<h3>Countries</h3>" +
+        '<div id="info-country-list">' +
+        (countryCards || '<p class="info-placeholder">No countries yet.</p>') +
+        "</div></div>" +
+        '<div class="info-divider"></div>' +
+        '<div id="info-section-tile" class="info-section">' +
+        "<h3>Selected tile</h3>" +
+        '<p class="info-tile-empty">Hover a tile on the map for its details.</p>' +
+        "</div>";
+    }
+
+    // Updates just the Selected-Tile section - called on every tile hover, so it stays cheap
+    // and doesn't touch the World/Countries sections next to it.
+    function renderTileSection(tileData, pinned) {
+      const section = document.getElementById("info-section-tile");
+      if (!section) return;
+      if (!tileData) {
+        section.innerHTML =
+          '<h3>Selected tile</h3><p class="info-tile-empty">Hover a tile on the map for its details, or click one to pin it.</p>';
+        return;
+      }
+      const deploymentsText = tileData.deployments.length
+        ? tileData.deployments.map((d) => d.country + ": " + d.divisions.length + " division(s)").join(", ")
+        : "none";
+      const rows = [
+        ["Position", "(" + tileData.x + ", " + tileData.y + ")"],
+        ["Country", tileData.country || "unclaimed"],
+        ["Terrain", tileData.terrain],
+        ["Buildings", tileData.buildings.length ? tileData.buildings.join(", ") : "none"],
+        ["Resources", tileData.resources.length ? tileData.resources.join(", ") : "none"],
+        ["Extraction sites", tileData.extractionSites.length ? tileData.extractionSites.join(", ") : "none"],
+        [
+          "Economic output",
+          formatCompact(tileData.economicOutput) + " (" + (tileData.economicGrowth * 100).toFixed(1) + "%)",
+        ],
+        [
+          "Population",
+          formatCompact(tileData.population) + " (proj " + (tileData.projectedPopulationGrowth * 100).toFixed(1) + "%)",
+        ],
+        ["Military", deploymentsText],
+      ];
+      const closeButton = pinned ? '<button type="button" id="info-tile-close" aria-label="Unpin tile">&times;</button>' : "";
+      section.innerHTML =
+        '<div class="info-tile-header"><h3>' +
+        escapeHtml(tileData.id) +
+        (pinned ? ' <span class="info-tile-pinned">pinned</span>' : "") +
+        "</h3>" +
+        closeButton +
+        "</div>" +
+        rows.map(([label, value]) => infoTileStatHtml(label, value)).join("");
+      if (pinned) {
+        document.getElementById("info-tile-close").addEventListener("click", (e) => {
+          e.stopPropagation();
+          unpinTile();
+        });
+      }
+    }
+
+    // Clicking a tile "pins" it - the Selected Tile section holds that tile until it's
+    // explicitly unpinned (the close button, clicking the same tile again, or clicking
+    // anywhere outside #map-pane), ignoring hover in the meantime so it doesn't get clobbered
+    // by just moving the mouse across the map.
+    let pinnedTileId = null;
+
+    function selectTile(tileId) {
+      pinnedTileId = tileId;
+      renderTileSection(JSON.parse(game.get_tile_info(world, tileId)), true);
+    }
+
+    function unpinTile() {
+      pinnedTileId = null;
+      renderTileSection(null);
+    }
+
+    // Delegated on #map-pane itself (never replaced, unlike its children) so this only needs
+    // attaching once - not re-attached on every `map` re-render like the standalone page's own
+    // hover script has to be.
+    mapPaneEl.addEventListener("mouseover", (e) => {
+      if (pinnedTileId) return;
+      const tile = e.target.closest(".tile");
+      if (!tile || !tile.dataset.id || !game || !world) return;
+      renderTileSection(JSON.parse(game.get_tile_info(world, tile.dataset.id)), false);
+    });
+    mapPaneEl.addEventListener("mouseleave", () => {
+      if (pinnedTileId) return;
+      renderTileSection(null);
+    });
+    mapPaneEl.addEventListener("click", (e) => {
+      const tile = e.target.closest(".tile");
+      if (!tile || !tile.dataset.id || !game || !world) return;
+      if (pinnedTileId === tile.dataset.id) {
+        unpinTile();
+      } else {
+        selectTile(tile.dataset.id);
+      }
+    });
+    document.addEventListener("click", (e) => {
+      if (!pinnedTileId || e.target.closest("#map-pane")) return;
+      unpinTile();
+    });
 
     // The game's `map` command normally shells out via webbrowser.open() to a real browser -
     // there's no such thing inside Pyodide's sandbox, so this gets wired in as a replacement:
@@ -695,10 +1036,10 @@ world = game.World()
 
     window.addEventListener("mousemove", (e) => {
       if (!splitterDragging) return;
-      const layoutRect = document.querySelector(".app-layout").getBoundingClientRect();
+      const topRowRect = document.getElementById("top-row").getBoundingClientRect();
       const minWidth = 320;
-      const maxWidth = layoutRect.width * 0.7;
-      const newWidth = Math.max(minWidth, Math.min(maxWidth, e.clientX - layoutRect.left));
+      const maxWidth = topRowRect.width * 0.7;
+      const newWidth = Math.max(minWidth, Math.min(maxWidth, e.clientX - topRowRect.left));
       terminalPaneEl.style.flexBasis = newWidth + "px";
     });
 
@@ -706,6 +1047,38 @@ world = game.World()
       if (!splitterDragging) return;
       splitterDragging = false;
       splitterEl.classList.remove("dragging");
+      document.body.style.userSelect = "";
+    });
+
+    // Same idea as #pane-splitter above, but vertical: resizes #info-pane's flex-basis off the
+    // mouse's distance from the bottom of .app-layout (since info-pane is anchored to the
+    // bottom), so dragging up grows it - shrinking #top-row (terminal + map) - and dragging
+    // down does the reverse. #top-row is flex: 1, so it just takes whatever's left, and the
+    // map's own ResizeObserver keeps it fitted as that space changes.
+    const rowSplitterEl = document.getElementById("row-splitter");
+    const infoPaneResizeEl = document.getElementById("info-pane");
+    let rowSplitterDragging = false;
+
+    rowSplitterEl.addEventListener("mousedown", (e) => {
+      rowSplitterDragging = true;
+      rowSplitterEl.classList.add("dragging");
+      document.body.style.userSelect = "none";
+      e.preventDefault();
+    });
+
+    window.addEventListener("mousemove", (e) => {
+      if (!rowSplitterDragging) return;
+      const layoutRect = document.querySelector(".app-layout").getBoundingClientRect();
+      const minHeight = 80;
+      const maxHeight = layoutRect.height * 0.7;
+      const newHeight = Math.max(minHeight, Math.min(maxHeight, layoutRect.bottom - e.clientY));
+      infoPaneResizeEl.style.flexBasis = newHeight + "px";
+    });
+
+    window.addEventListener("mouseup", () => {
+      if (!rowSplitterDragging) return;
+      rowSplitterDragging = false;
+      rowSplitterEl.classList.remove("dragging");
       document.body.style.userSelect = "";
     });
 
