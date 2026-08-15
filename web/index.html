@@ -452,6 +452,8 @@
           ["list-countries", "List all countries"],
           ["setgovernment <country> <government>", "Set a country's government type"],
           ["country-status <country>", "Show a country's GDP, population, and other stats"],
+          ["export-country <country> [path]", "Export a country's nodes, GDP, population, and divisions as a .md file"],
+          ["export-world [path]", "Export every country's summary stats as a .md file"],
         ],
       },
       {
@@ -490,8 +492,25 @@
             "Create and deploy an air force division",
           ],
           ["deploy-reserve <country> <name> <id>", "Deploy an existing reserve division"],
-          ["move-division <country> <name> <destination_id>", "Move an already-deployed division to another node"],
+          [
+            "move-division <country> <name> <destination_id>",
+            "Move a division to another node - attacks if the destination is enemy territory",
+          ],
+          [
+            "group-attack <country> <origin_id> <destination_id>",
+            "Attack enemy territory with every division that country has at origin_id",
+          ],
+          ["set-equipment <country> <name> <rating>", "Set a division's equipment cap (current rating climbs toward it with supply)"],
+          ["recover <country> <name>", "Immediately restore a division to full manpower, morale, and equipment"],
           ["country-divisions <country>", "List all of a country's divisions, deployed and in reserve"],
+        ],
+      },
+      {
+        title: "Diplomacy & war",
+        commands: [
+          ["declare-war <country_a> <country_b>", "Put two countries at war"],
+          ["make-peace <country_a> <country_b>", "End a war between two countries"],
+          ["wars", "List every war currently in progress"],
         ],
       },
       {
@@ -833,7 +852,7 @@
 
       const files = ["main.py", "node.py", "country.py", "division.py", "database.py"];
       for (const f of files) {
-        const resp = await fetch("../" + f);
+        const resp = await fetch("../" + f, { cache: "no-store" });
         if (!resp.ok) throw new Error("failed to fetch " + f + " (" + resp.status + ")");
         pyodide.FS.writeFile(f, await resp.text());
       }
@@ -867,9 +886,24 @@ world = game.World()
       inputEl.focus();
     }
 
+    function downloadFromPyodideFS(path, mimeType) {
+      try {
+        const data = pyodide.FS.readFile(path, { encoding: "utf8" });
+        const blob = new Blob([data], { type: mimeType });
+        const a = document.createElement("a");
+        a.href = URL.createObjectURL(blob);
+        a.download = path.split("/").pop();
+        a.click();
+        URL.revokeObjectURL(a.href);
+      } catch (e) {
+        appendOutput("[download failed: " + e + "]\n");
+      }
+    }
+
     function runLine(line) {
       appendOutput("> " + line + "\n");
-      if (line.trim().split(/\s+/)[0].toLowerCase() === "help") {
+      const firstWord = line.trim().split(/\s+/)[0].toLowerCase();
+      if (firstWord === "help") {
         openHelpModal();
         return;
       }
@@ -878,6 +912,10 @@ world = game.World()
         keepGoing = game.run_command(world, line);
       } catch (e) {
         appendOutput("[error running command: " + e + "]\n");
+      }
+      if (firstWord === "export-country" || firstWord === "export-world") {
+        const exportPath = game.get_last_export_path();
+        if (exportPath) downloadFromPyodideFS(exportPath, "text/markdown");
       }
       if (keepGoing === false) {
         appendOutput("\n[session ended - reload the page to start a new one]\n");
@@ -940,7 +978,11 @@ world = game.World()
       if (matches.length === 0) {
         lastTabPartial = null;
       } else if (matches.length === 1) {
-        replaceCurrentWord(matches[0] + " ");
+        // A match containing whitespace (e.g. a "United States"-style country or division name)
+        // has to be quoted on insertion, or shlex.split on submit would split it into several
+        // arguments instead of the one it's meant to be.
+        const value = /\s/.test(matches[0]) ? shellQuote(matches[0]) : matches[0];
+        replaceCurrentWord(value + " ");
         lastTabPartial = null;
       } else {
         const lcp = longestCommonPrefix(matches);
@@ -1097,19 +1139,7 @@ world = game.World()
 
     downloadBtn.addEventListener("click", () => {
       runLine("save");
-      const savePath = world.save_path;
-      if (!savePath) return;
-      try {
-        const data = pyodide.FS.readFile(savePath, { encoding: "utf8" });
-        const blob = new Blob([data], { type: "application/json" });
-        const a = document.createElement("a");
-        a.href = URL.createObjectURL(blob);
-        a.download = savePath.split("/").pop();
-        a.click();
-        URL.revokeObjectURL(a.href);
-      } catch (e) {
-        appendOutput("[download failed: " + e + "]\n");
-      }
+      if (world.save_path) downloadFromPyodideFS(world.save_path, "application/json");
     });
 
     init().catch((e) => {
