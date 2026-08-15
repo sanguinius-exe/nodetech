@@ -65,6 +65,7 @@ COMMAND_NAMES = sorted(
         "setgovernment",
         "governments",
         "advance-year",
+        "set-year",
         "year",
         "forceupdate",
         "world",
@@ -1244,6 +1245,17 @@ def run_command(world: World, raw: str) -> bool:
     elif command == "advance-year":
         advance_year(world)
         print(f"Year advanced to {world.year}.")
+    elif command == "set-year":
+        if len(args) != 1:
+            print("Usage: set-year <year>")
+        else:
+            try:
+                new_year = int(args[0])
+            except ValueError:
+                print("Year must be an integer.")
+            else:
+                world.year = new_year
+                print(f"Year set to {world.year}.")
     elif command == "year":
         print(f"Year: {world.year} ({world.year - world.start_year} years since the file started)")
     elif command == "forceupdate":
