@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import random
 import re
 import shlex
 import webbrowser
@@ -37,6 +38,8 @@ COMMAND_NAMES = sorted(
         "view",
         "connect",
         "disconnect",
+        "build-railroad",
+        "remove-railroad",
         "setcountry",
         "setterrain",
         "setpopulation",
@@ -54,6 +57,12 @@ COMMAND_NAMES = sorted(
         "deploy-airforce",
         "deploy-reserve",
         "move-division",
+        "group-attack",
+        "set-equipment",
+        "recover",
+        "declare-war",
+        "make-peace",
+        "wars",
         "buildings",
         "resources",
         "extraction-sites",
@@ -72,6 +81,8 @@ COMMAND_NAMES = sorted(
         "projections",
         "country-divisions",
         "country-status",
+        "export-country",
+        "export-world",
         "open",
         "save",
         "new-world",
@@ -88,6 +99,8 @@ ARG_COMPLETIONS: dict[str, list[str | list[str]]] = {
     "view": ["node"],
     "connect": ["node", "node"],
     "disconnect": ["node", "node"],
+    "build-railroad": ["node", "node"],
+    "remove-railroad": ["node", "node"],
     "setcountry": ["node", "country"],
     "setterrain": ["node", [t.name.lower() for t in Terrain]],
     "setpopulation": ["node"],
@@ -105,11 +118,17 @@ ARG_COMPLETIONS: dict[str, list[str | list[str]]] = {
     "deploy-airforce": ["node", "country"],
     "deploy-reserve": ["country", [], "node"],
     "move-division": ["country", [], "node"],
+    "group-attack": ["country", "node", "node"],
+    "set-equipment": ["country", []],
+    "recover": ["country", []],
+    "declare-war": ["country", "country"],
+    "make-peace": ["country", "country"],
     "create-country": [[], [g.name.lower() for g in GovernmentType]],
     "view-country": ["country"],
     "setgovernment": ["country", [g.name.lower() for g in GovernmentType]],
     "country-divisions": ["country"],
     "country-status": ["country"],
+    "export-country": ["country"],
     "world": [["status", "divisions"]],
     "open": ["world_name"],
     "save": ["world_name"],
@@ -129,6 +148,7 @@ class World:
         self.save_path: str | None = None
         self.width: int = DEFAULT_GRID_SIZE
         self.height: int = DEFAULT_GRID_SIZE
+        self.wars: set[frozenset[str]] = set()
 
     def add_node(self, node: Node) -> None:
         self.nodes[node.id] = node
@@ -148,39 +168,70 @@ class World:
     def get_country(self, name: str) -> Country | None:
         return self.countries.get(name)
 
+    def is_at_war(self, country_a: str, country_b: str) -> bool:
+        return frozenset((country_a, country_b)) in self.wars
+
+    def declare_war(self, country_a: str, country_b: str) -> None:
+        self.wars.add(frozenset((country_a, country_b)))
+
+    def make_peace(self, country_a: str, country_b: str) -> None:
+        self.wars.discard(frozenset((country_a, country_b)))
+
 
 def format_division_summary(division: Division) -> str:
     return (
         f"{division.get_name()} [{division.get_id()}]: {division.get_division_type().name}, "
-        f"{division.get_manpower()} men, supply {division.get_supply_requirement()}, "
-        f"morale {division.get_morale()}"
+        f"{division.get_manpower()}/{division.get_max_manpower()} men, supply {division.get_supply_requirement()}, "
+        f"morale {division.get_morale()}, "
+        f"equipment {division.get_equipment_rating():.1f}/{division.get_equipment_cap():.1f}"
     )
 
 
 def format_division_extra(division: Division) -> str | None:
     if isinstance(division, AirForceDivision):
-        return (
-            f"{division.get_aircraft_count()}x {division.get_aircraft_type()}, "
-            f"equipment rating {division.get_equipment_rating()}, range {division.get_range()}"
-        )
+        return f"{division.get_aircraft_count()}x {division.get_aircraft_type()}, range {division.get_range()}"
     return None
 
 
-def format_node(node: Node) -> str:
+def format_node(world: World, node: Node) -> str:
     lines = [
         f"Node: {node.get_id()}",
         f"  Position: ({node.get_x()}, {node.get_y()})",
         f"  Country: {node.get_country() or 'unclaimed'}",
         f"  Terrain: {node.get_terrain().name}",
         f"  Connected tiles: {', '.join(node.get_connected_tiles()) or 'none'}",
+        f"  Railroad links: {', '.join(node.get_rail_connected_tiles()) or 'none'}",
         f"  Buildings: {', '.join(b.name for b in node.get_available_buildings()) or 'none'}",
         f"  Resources: {', '.join(r.name for r in node.get_available_resources()) or 'none'}",
         f"  Extraction sites: {', '.join(s.name for s in node.get_available_extraction_sites()) or 'none'}",
         f"  Economic output: {node.get_economic_output()} (growth {node.calculate_economic_growth_rate():+.2%})",
         f"  Population: {node.get_population()} (growth {node.get_population_growth_rate():+.2%}, "
         f"projected {node.calculate_projected_population_growth_rate():+.2%})",
-        "  Military deployments:",
     ]
+    local_supply = node.get_local_supply()
+    if node.country:
+        local_demand = sum(
+            division.supply_requirement
+            for deployment in node.military_deployments
+            if deployment.country == node.country
+            for division in deployment.divisions
+        )
+        cluster_size = len(_rail_cluster(world, node, node.country))
+        network = "itself only" if cluster_size == 1 else f"{cluster_size} rail-linked nodes"
+        balance = local_supply - local_demand
+        if balance >= 0:
+            lines.append(
+                f"  Supply: {local_supply:.1f} local (demand {local_demand:.1f}, "
+                f"{balance:.1f} surplus shareable with {network})"
+            )
+        else:
+            lines.append(
+                f"  Supply: {local_supply:.1f} local (demand {local_demand:.1f}, "
+                f"{-balance:.1f} short - pooled from {network} if available)"
+            )
+    else:
+        lines.append(f"  Supply: {local_supply:.1f} local (unclaimed, no supply network)")
+    lines.append("  Military deployments:")
     deployments = node.get_military_deployments()
     if not deployments:
         lines.append("    none")
@@ -247,6 +298,20 @@ def connect_nodes(n1: Node, n2: Node) -> None:
         n1.connected_tiles.append(n2.id)
     if n1.id not in n2.connected_tiles:
         n2.connected_tiles.append(n1.id)
+
+
+def link_rail(n1: Node, n2: Node) -> None:
+    if n2.id not in n1.rail_connected_tiles:
+        n1.rail_connected_tiles.append(n2.id)
+    if n1.id not in n2.rail_connected_tiles:
+        n2.rail_connected_tiles.append(n1.id)
+
+
+def unlink_rail(n1: Node, n2: Node) -> None:
+    if n2.id in n1.rail_connected_tiles:
+        n1.rail_connected_tiles.remove(n2.id)
+    if n1.id in n2.rail_connected_tiles:
+        n2.rail_connected_tiles.remove(n1.id)
 
 
 def auto_connect_grid_neighbors(world: World, node: Node) -> None:
@@ -492,7 +557,7 @@ def cmd_view(world: World, args: list[str]) -> None:
     if node is None:
         print(f"No such node '{args[0]}'.")
         return
-    print(format_node(node))
+    print(format_node(world, node))
 
 
 def cmd_connect(world: World, args: list[str]) -> None:
@@ -521,7 +586,37 @@ def cmd_disconnect(world: World, args: list[str]) -> None:
         n1.connected_tiles.remove(id2)
     if id1 in n2.connected_tiles:
         n2.connected_tiles.remove(id1)
+    unlink_rail(n1, n2)  # a railroad can't outlive the connection it runs along
     print(f"Disconnected '{id1}' <-> '{id2}'.")
+
+
+def cmd_build_railroad(world: World, args: list[str]) -> None:
+    if len(args) != 2:
+        print("Usage: build-railroad <id1> <id2>")
+        return
+    id1, id2 = args
+    n1, n2 = world.get_node(id1), world.get_node(id2)
+    if n1 is None or n2 is None:
+        print("Both nodes must exist.")
+        return
+    if id2 not in n1.connected_tiles:
+        print(f"'{id1}' and '{id2}' aren't connected yet - use 'connect' first.")
+        return
+    link_rail(n1, n2)
+    print(f"Built a railroad between '{id1}' and '{id2}'.")
+
+
+def cmd_remove_railroad(world: World, args: list[str]) -> None:
+    if len(args) != 2:
+        print("Usage: remove-railroad <id1> <id2>")
+        return
+    id1, id2 = args
+    n1, n2 = world.get_node(id1), world.get_node(id2)
+    if n1 is None or n2 is None:
+        print("Both nodes must exist.")
+        return
+    unlink_rail(n1, n2)
+    print(f"Removed the railroad between '{id1}' and '{id2}'.")
 
 
 def cmd_setcountry(world: World, args: list[str]) -> None:
@@ -638,6 +733,163 @@ def cmd_country_status(world: World, args: list[str]) -> None:
         print(f"No such country '{args[0]}'.")
         return
     print(format_country_status(country))
+
+
+def _country_report_markdown(world: World, country: Country) -> str:
+    deployed = get_country_divisions(world.nodes, country.name)
+    lines = [
+        f"# {country.name}",
+        "",
+        f"**Government:** {country.government_type.name}  ",
+        f"**Year:** {world.year} ({world.year - world.start_year} years since the world started)",
+        "",
+        "## Overview",
+        "",
+        "| Stat | Value |",
+        "| --- | --- |",
+        f"| GDP | {country.calculate_economic_output(world.nodes):.2f} |",
+        f"| Economic growth | {country.calculate_economic_growth_rate(world.nodes):+.2%} |",
+        f"| Population | {country.calculate_population(world.nodes)} |",
+        f"| Population growth (projected) | {country.calculate_projected_population_growth_rate(world.nodes):+.2%} |",
+        f"| Treasury | {country.treasury:.2f} |",
+        f"| Stability | {country.stability:.2f} |",
+        f"| Nodes | {len(country.nodes)} |",
+        f"| Divisions | {len(deployed) + len(country.reserve_divisions)} ({len(country.reserve_divisions)} reserve) |",
+        "",
+    ]
+
+    enemies = sorted({other for pair in world.wars for other in pair if country.name in pair and other != country.name})
+    if enemies:
+        lines.append(f"**At war with:** {', '.join(enemies)}")
+        lines.append("")
+
+    lines.append("## Nodes")
+    lines.append("")
+    if not country.nodes:
+        lines.append("_No nodes._")
+    else:
+        lines.append("| ID | Position | Terrain | Population | Economic Output | Growth | Buildings |")
+        lines.append("| --- | --- | --- | --- | --- | --- | --- |")
+        for node_id in sorted(country.nodes):
+            node = world.nodes.get(node_id)
+            if node is None:
+                continue
+            buildings = ", ".join(b.name for b in node.get_available_buildings()) or "none"
+            lines.append(
+                f"| {node.id} | ({node.x}, {node.y}) | {node.terrain.name} | {node.population} | "
+                f"{node.economic_output:.2f} | {node.calculate_economic_growth_rate():+.2%} | {buildings} |"
+            )
+    lines.append("")
+
+    lines.append("## Deployed divisions")
+    lines.append("")
+    if not deployed:
+        lines.append("_None deployed._")
+    else:
+        lines.append("| Name | Type | Location | Manpower | Morale | Equipment |")
+        lines.append("| --- | --- | --- | --- | --- | --- |")
+        for division in deployed:
+            lines.append(
+                f"| {division.name} | {division.division_type.name} | {division.location} | "
+                f"{division.manpower}/{division.max_manpower} | {division.morale:.1f} | "
+                f"{division.equipment_rating:.1f}/{division.equipment_cap:.1f} |"
+            )
+    lines.append("")
+
+    lines.append("## Reserve divisions")
+    lines.append("")
+    if not country.reserve_divisions:
+        lines.append("_None in reserve._")
+    else:
+        lines.append("| Name | Type | Manpower | Morale | Equipment |")
+        lines.append("| --- | --- | --- | --- | --- |")
+        for division in country.reserve_divisions:
+            lines.append(
+                f"| {division.name} | {division.division_type.name} | "
+                f"{division.manpower}/{division.max_manpower} | {division.morale:.1f} | "
+                f"{division.equipment_rating:.1f}/{division.equipment_cap:.1f} |"
+            )
+    lines.append("")
+
+    return "\n".join(lines)
+
+
+# The path most recently written by export-country/export-world - reset at the start of each
+# call so a failed attempt (bad country name, etc.) doesn't leave a stale path behind. Lets the
+# web terminal know what file to offer for download right after running the command, without
+# having to scrape it back out of the printed confirmation text.
+_last_export_path: str | None = None
+
+
+def get_last_export_path() -> str:
+    return _last_export_path or ""
+
+
+def cmd_export_country(world: World, args: list[str]) -> None:
+    global _last_export_path
+    _last_export_path = None
+    if len(args) not in (1, 2):
+        print("Usage: export-country <country> [path]")
+        return
+    country_name = args[0]
+    country = world.get_country(country_name)
+    if country is None:
+        print(f"No such country '{country_name}'.")
+        return
+    path = Path(args[1]) if len(args) == 2 else database.ensure_save_dir() / f"{country_name}_report.md"
+    path.write_text(_country_report_markdown(world, country))
+    _last_export_path = str(path)
+    print(f"Exported '{country_name}' report to '{path}'.")
+
+
+def _world_report_markdown(world: World) -> str:
+    save_name = Path(world.save_path).stem if world.save_path else "unsaved world"
+    lines = [
+        f"# World report - {save_name}",
+        "",
+        f"**Year:** {world.year} ({world.year - world.start_year} years since the world started)  ",
+        f"**Grid:** {world.width} x {world.height}  ",
+        f"**Nodes:** {len(world.nodes)}  ",
+        f"**Countries:** {len(world.countries)}",
+        "",
+        "## Countries",
+        "",
+        "| Name | Government | GDP | Population | Growth | Nodes | Divisions |",
+        "| --- | --- | --- | --- | --- | --- | --- |",
+    ]
+    for country in world.countries.values():
+        divisions = len(get_country_divisions(world.nodes, country.name)) + len(country.reserve_divisions)
+        lines.append(
+            f"| {country.name} | {country.government_type.name} | "
+            f"{country.calculate_economic_output(world.nodes):.2f} | "
+            f"{country.calculate_population(world.nodes)} | "
+            f"{country.calculate_economic_growth_rate(world.nodes):+.2%} | "
+            f"{len(country.nodes)} | {divisions} |"
+        )
+    lines.append("")
+
+    if world.wars:
+        lines.append("## Wars")
+        lines.append("")
+        for pair in world.wars:
+            country_a, country_b = sorted(pair)
+            lines.append(f"- {country_a} vs {country_b}")
+        lines.append("")
+
+    return "\n".join(lines)
+
+
+def cmd_export_world(world: World, args: list[str]) -> None:
+    global _last_export_path
+    _last_export_path = None
+    if len(args) > 1:
+        print("Usage: export-world [path]")
+        return
+    save_name = Path(world.save_path).stem if world.save_path else "world"
+    path = Path(args[0]) if args else database.ensure_save_dir() / f"{save_name}_report.md"
+    path.write_text(_world_report_markdown(world))
+    _last_export_path = str(path)
+    print(f"Exported world report to '{path}'.")
 
 
 def cmd_setgovernment(world: World, args: list[str]) -> None:
@@ -998,6 +1250,216 @@ def cmd_deploy_reserve(world: World, args: list[str]) -> None:
     print(f"Deployed reserve division '{name}' for {country_name} to '{node_id}'.")
 
 
+def cmd_set_equipment(world: World, args: list[str]) -> None:
+    if len(args) != 3:
+        print("Usage: set-equipment <country> <name> <rating>")
+        return
+    country_name, name, rating_str = args
+    division = find_division_by_name(world, country_name, name)
+    if division is None:
+        print(f"'{country_name}' has no division named '{name}'.")
+        return
+    try:
+        rating = float(rating_str)
+    except ValueError:
+        print("Rating must be a number.")
+        return
+    division.equipment_cap = rating
+    division.equipment_rating = min(division.equipment_rating, rating)
+    print(f"'{name}' equipment cap set to {rating:.1f} (currently at {division.equipment_rating:.1f}).")
+
+
+def cmd_recover(world: World, args: list[str]) -> None:
+    if len(args) != 2:
+        print("Usage: recover <country> <name>")
+        return
+    country_name, name = args
+    division = find_division_by_name(world, country_name, name)
+    if division is None:
+        print(f"'{country_name}' has no division named '{name}'.")
+        return
+    division.manpower = division.max_manpower
+    division.morale = 100.0
+    division.equipment_rating = division.equipment_cap
+    print(
+        f"'{name}' recovered to full strength: {division.manpower} men, morale 100.0, "
+        f"equipment {division.equipment_rating:.1f}."
+    )
+
+
+def cmd_declare_war(world: World, args: list[str]) -> None:
+    if len(args) != 2:
+        print("Usage: declare-war <country_a> <country_b>")
+        return
+    country_a, country_b = args
+    if world.get_country(country_a) is None:
+        print(f"No such country '{country_a}'.")
+        return
+    if world.get_country(country_b) is None:
+        print(f"No such country '{country_b}'.")
+        return
+    if country_a == country_b:
+        print("A country can't be at war with itself.")
+        return
+    if world.is_at_war(country_a, country_b):
+        print(f"'{country_a}' and '{country_b}' are already at war.")
+        return
+    world.declare_war(country_a, country_b)
+    print(f"'{country_a}' and '{country_b}' are now at war.")
+
+
+def cmd_make_peace(world: World, args: list[str]) -> None:
+    if len(args) != 2:
+        print("Usage: make-peace <country_a> <country_b>")
+        return
+    country_a, country_b = args
+    if not world.is_at_war(country_a, country_b):
+        print(f"'{country_a}' and '{country_b}' aren't at war.")
+        return
+    world.make_peace(country_a, country_b)
+    print(f"'{country_a}' and '{country_b}' are at peace.")
+
+
+def cmd_wars(world: World) -> None:
+    if not world.wars:
+        print("No wars.")
+        return
+    for pair in world.wars:
+        country_a, country_b = sorted(pair)
+        print(f"  {country_a} vs {country_b}")
+
+
+# How much rougher terrain slows an attack launched from it, and how much it helps whoever's
+# defending it - both keyed off the same Terrain enum nodes already carry, no new tile data needed.
+TERRAIN_ATTACK_MODIFIERS: dict[Terrain, float] = {
+    Terrain.PLAINS: 1.0,
+    Terrain.FOREST: 0.9,
+    Terrain.HILLS: 0.85,
+    Terrain.MOUNTAIN: 0.75,
+    Terrain.DESERT: 0.95,
+    Terrain.WATER: 1.0,
+    Terrain.URBAN: 0.9,
+}
+
+TERRAIN_DEFENSE_MODIFIERS: dict[Terrain, float] = {
+    Terrain.PLAINS: 1.0,
+    Terrain.FOREST: 1.15,
+    Terrain.HILLS: 1.2,
+    Terrain.MOUNTAIN: 1.35,
+    Terrain.DESERT: 1.0,
+    Terrain.WATER: 1.0,
+    Terrain.URBAN: 1.25,
+}
+
+# Each side's strength is rolled independently within this range, so two otherwise-identical
+# forces don't produce the exact same outcome twice.
+COMBAT_RANDOMNESS_RANGE = (0.85, 1.15)
+
+
+def _combat_strength(division: Division, terrain_modifier: float) -> float:
+    return (
+        division.manpower
+        * (division.morale / 100.0)
+        * (division.equipment_rating / 100.0)
+        * terrain_modifier
+        * random.uniform(*COMBAT_RANDOMNESS_RANGE)
+    )
+
+
+def resolve_combat(
+    world: World, attackers: list[Division], attacker_country: str, origin: Node, destination: Node
+) -> None:
+    """One or more attacking divisions - all starting from `origin` - against every division the
+    defending country has stationed at `destination`. Casualties are proportional to relative
+    strength (each division's manpower, morale, equipment, and terrain feed into its own combat
+    strength, plus an independent random roll per division) - the weaker side bleeds more, but
+    neither side comes out unscathed, and the resulting loss fraction applies evenly across every
+    division on that side. The attackers only take the node if every defender there is wiped and
+    at least one attacker survives; otherwise survivors retreat to `origin` with whatever losses
+    they took."""
+    defender_country = destination.country
+    defending_deployment = next((d for d in destination.military_deployments if d.country == defender_country), None)
+    defenders = list(defending_deployment.divisions) if defending_deployment else []
+
+    total_attacker_strength = sum(_combat_strength(d, TERRAIN_ATTACK_MODIFIERS[origin.terrain]) for d in attackers)
+    total_defender_strength = sum(_combat_strength(d, TERRAIN_DEFENSE_MODIFIERS[destination.terrain]) for d in defenders)
+    total_strength = total_attacker_strength + total_defender_strength
+
+    attacker_names = ", ".join(a.name for a in attackers)
+    print(
+        f"Battle at '{destination.id}': {len(attackers)} {attacker_country} division(s) [{attacker_names}] "
+        f"vs {len(defenders)} {defender_country} division(s)."
+    )
+    if total_strength <= 0:
+        print("  Neither side can fight - the attack fizzles.")
+        return
+
+    attacker_loss_fraction = total_defender_strength / total_strength
+    defender_loss_fraction = total_attacker_strength / total_strength
+
+    for division in attackers:
+        division.manpower = max(0, round(division.manpower * (1 - attacker_loss_fraction)))
+    for division in defenders:
+        division.manpower = max(0, round(division.manpower * (1 - defender_loss_fraction)))
+
+    destroyed_defenders = [d for d in defenders if d.manpower <= 0]
+    surviving_defenders = [d for d in defenders if d.manpower > 0]
+    if destroyed_defenders and defending_deployment is not None:
+        for division in destroyed_defenders:
+            defending_deployment.divisions.remove(division)
+        if not defending_deployment.divisions:
+            destination.military_deployments.remove(defending_deployment)
+        print(f"  {defender_country} losses: {', '.join(d.name for d in destroyed_defenders)} destroyed.")
+
+    def _remove_from_origin(division: Division) -> None:
+        origin_deployment = next((d for d in origin.military_deployments if d.country == attacker_country), None)
+        if origin_deployment is not None and division in origin_deployment.divisions:
+            origin_deployment.divisions.remove(division)
+            if not origin_deployment.divisions:
+                origin.military_deployments.remove(origin_deployment)
+
+    destroyed_attackers = [d for d in attackers if d.manpower <= 0]
+    surviving_attackers = [d for d in attackers if d.manpower > 0]
+    for division in destroyed_attackers:
+        _remove_from_origin(division)
+    if destroyed_attackers:
+        print(f"  {attacker_country} losses: {', '.join(d.name for d in destroyed_attackers)} destroyed.")
+
+    if not surviving_attackers:
+        print("  The entire attacking force was wiped out.")
+        return
+
+    if surviving_defenders:
+        print(
+            f"  Attack repelled - {', '.join(f'{d.name} ({d.manpower})' for d in surviving_attackers)} "
+            f"retreat to '{origin.id}'."
+        )
+        return
+
+    # Clean sweep: every surviving attacker occupies the node and it changes hands.
+    for division in surviving_attackers:
+        _remove_from_origin(division)
+    new_deployment = next((d for d in destination.military_deployments if d.country == attacker_country), None)
+    if new_deployment is None:
+        new_deployment = MilitaryDeployment(country=attacker_country)
+        destination.military_deployments.append(new_deployment)
+    for division in surviving_attackers:
+        new_deployment.divisions.append(division)
+        division.location = destination.id
+
+    old_owner = world.get_country(defender_country) if defender_country else None
+    if old_owner is not None and destination.id in old_owner.nodes:
+        old_owner.nodes.remove(destination.id)
+    destination.country = attacker_country
+    new_owner = world.get_country(attacker_country)
+    if new_owner is not None and destination.id not in new_owner.nodes:
+        new_owner.nodes.append(destination.id)
+    print(
+        f"  '{destination.id}' falls to {attacker_country} - "
+        f"{', '.join(f'{d.name} ({d.manpower})' for d in surviving_attackers)} occupy it."
+    )
+
+
 def cmd_move_division(world: World, args: list[str]) -> None:
     if len(args) != 3:
         print("Usage: move-division <country> <name> <destination_id>")
@@ -1023,6 +1485,20 @@ def cmd_move_division(world: World, args: list[str]) -> None:
 
     origin_id = division.location
     origin = world.get_node(origin_id)
+
+    if destination.country is not None and destination.country != country_name:
+        if not world.is_at_war(country_name, destination.country):
+            print(
+                f"'{destination_id}' is controlled by '{destination.country}', and you're not at war "
+                f"with them - use 'declare-war' first, or move somewhere else."
+            )
+            return
+        if origin is None:
+            print(f"'{name}''s current node no longer exists - it can't attack from nowhere.")
+            return
+        resolve_combat(world, [division], country_name, origin, destination)
+        return
+
     if origin is not None:
         deployment = next((d for d in origin.military_deployments if d.country == country_name), None)
         if deployment is not None and division in deployment.divisions:
@@ -1039,16 +1515,149 @@ def cmd_move_division(world: World, args: list[str]) -> None:
     print(f"Moved '{name}' from '{origin_id}' to '{destination_id}'.")
 
 
+def cmd_group_attack(world: World, args: list[str]) -> None:
+    if len(args) != 3:
+        print("Usage: group-attack <country> <origin_id> <destination_id>")
+        return
+    country_name, origin_id, destination_id = args
+    if world.get_country(country_name) is None:
+        print(f"No such country '{country_name}'.")
+        return
+    origin = world.get_node(origin_id)
+    if origin is None:
+        print(f"No such node '{origin_id}'.")
+        return
+    destination = world.get_node(destination_id)
+    if destination is None:
+        print(f"No such node '{destination_id}'.")
+        return
+    if origin_id == destination_id:
+        print(f"'{origin_id}' and '{destination_id}' are the same node.")
+        return
+
+    origin_deployment = next((d for d in origin.military_deployments if d.country == country_name), None)
+    attackers = list(origin_deployment.divisions) if origin_deployment is not None else []
+    if not attackers:
+        print(f"'{country_name}' has no divisions at '{origin_id}'.")
+        return
+
+    if destination.country is None or destination.country == country_name:
+        print(f"'{destination_id}' isn't enemy territory - use 'move-division' to relocate there instead.")
+        return
+    if not world.is_at_war(country_name, destination.country):
+        print(
+            f"'{destination_id}' is controlled by '{destination.country}', and you're not at war "
+            f"with them - use 'declare-war' first, or attack somewhere else."
+        )
+        return
+
+    resolve_combat(world, attackers, country_name, origin, destination)
+
+
 def refresh_country_stats(world: World) -> None:
     for country in world.countries.values():
         country.update_economic_output(world.nodes)
         country.update_population(world.nodes)
 
 
+# Max morale/equipment a division loses in one year if its rail network's supply is fully
+# exhausted (demand far past what's available); a network that's merely short loses
+# proportionally less. A fully-supplied division instead climbs back toward its equipment_cap by
+# EQUIPMENT_RECOVERY_PER_YEAR each year.
+SUPPLY_SHORTFALL_MORALE_PENALTY = 15.0
+SUPPLY_SHORTFALL_EQUIPMENT_PENALTY = 10.0
+EQUIPMENT_RECOVERY_PER_YEAR = 5.0
+
+
+def _rail_cluster(world: World, start: Node, country_name: str) -> list[Node]:
+    """Every node reachable from `start` by following only rail_connected_tiles edges, staying
+    within nodes owned by `country_name` - the logistics network `start` belongs to. A node
+    with no railroad at all is its own cluster of one."""
+    seen = {start.id}
+    frontier = [start]
+    cluster = [start]
+    while frontier:
+        current = frontier.pop()
+        for neighbor_id in current.rail_connected_tiles:
+            if neighbor_id in seen:
+                continue
+            neighbor = world.nodes.get(neighbor_id)
+            if neighbor is None or neighbor.country != country_name:
+                continue
+            seen.add(neighbor_id)
+            cluster.append(neighbor)
+            frontier.append(neighbor)
+    return cluster
+
+
+def apply_supply_shortfalls(world: World) -> None:
+    """Once a year, every node first covers its own divisions from its own local supply
+    (Node.get_local_supply()). Whatever's left over - a node with no divisions gives up all of
+    it - is pooled across the rest of its rail-connected, same-country cluster and split
+    proportionally among any nodes still short. A division whose demand is fully covered (whether
+    by its own node or the pool) has its equipment climb toward its cap; anything left unmet dings
+    both morale and equipment, proportional to how much of it went unmet."""
+    visited: set[str] = set()
+    for country_name, country in world.countries.items():
+        for node_id in country.nodes:
+            if node_id in visited:
+                continue
+            node = world.nodes.get(node_id)
+            if node is None:
+                continue
+            cluster = _rail_cluster(world, node, country_name)
+            visited.update(member.id for member in cluster)
+
+            local_demand: dict[str, float] = {}
+            divisions_by_node: dict[str, list[Division]] = {}
+            for member in cluster:
+                divisions = [
+                    division
+                    for deployment in member.military_deployments
+                    if deployment.country == country_name
+                    for division in deployment.divisions
+                ]
+                divisions_by_node[member.id] = divisions
+                local_demand[member.id] = sum(division.supply_requirement for division in divisions)
+
+            if not any(divisions_by_node.values()):
+                continue
+
+            excess_pool = 0.0
+            shortfalls: dict[str, float] = {}
+            for member in cluster:
+                balance = member.get_local_supply() - local_demand[member.id]
+                if balance >= 0:
+                    excess_pool += balance
+                else:
+                    shortfalls[member.id] = -balance
+
+            total_shortfall = sum(shortfalls.values())
+            coverage_ratio = min(1.0, excess_pool / total_shortfall) if total_shortfall > 0 else 1.0
+
+            for member_id, divisions in divisions_by_node.items():
+                if not divisions:
+                    continue
+                unmet = shortfalls.get(member_id, 0.0) * (1.0 - coverage_ratio)
+                if unmet <= 0:
+                    for division in divisions:
+                        division.equipment_rating = min(
+                            division.equipment_cap, division.equipment_rating + EQUIPMENT_RECOVERY_PER_YEAR
+                        )
+                    continue
+                penalty_ratio = unmet / local_demand[member_id]
+                morale_penalty = SUPPLY_SHORTFALL_MORALE_PENALTY * penalty_ratio
+                equipment_penalty = SUPPLY_SHORTFALL_EQUIPMENT_PENALTY * penalty_ratio
+                for division in divisions:
+                    division.morale = max(0.0, division.morale - morale_penalty)
+                    division.equipment_rating = max(0.0, division.equipment_rating - equipment_penalty)
+
+
 def advance_year(world: World) -> None:
     world.year += 1
     for node in world.nodes.values():
         node.advance_year()
+    apply_supply_shortfalls(world)
     refresh_country_stats(world)
 
 
@@ -1185,6 +1794,10 @@ def run_command(world: World, raw: str) -> bool:
         cmd_connect(world, args)
     elif command == "disconnect":
         cmd_disconnect(world, args)
+    elif command == "build-railroad":
+        cmd_build_railroad(world, args)
+    elif command == "remove-railroad":
+        cmd_remove_railroad(world, args)
     elif command == "setcountry":
         cmd_setcountry(world, args)
     elif command == "setterrain":
@@ -1219,6 +1832,18 @@ def run_command(world: World, raw: str) -> bool:
         cmd_deploy_reserve(world, args)
     elif command == "move-division":
         cmd_move_division(world, args)
+    elif command == "group-attack":
+        cmd_group_attack(world, args)
+    elif command == "set-equipment":
+        cmd_set_equipment(world, args)
+    elif command == "recover":
+        cmd_recover(world, args)
+    elif command == "declare-war":
+        cmd_declare_war(world, args)
+    elif command == "make-peace":
+        cmd_make_peace(world, args)
+    elif command == "wars":
+        cmd_wars(world)
     elif command == "buildings":
         print(", ".join(b.name for b in BuildingType))
     elif command == "resources":
@@ -1274,6 +1899,10 @@ def run_command(world: World, raw: str) -> bool:
         cmd_country_divisions(world, args)
     elif command == "country-status":
         cmd_country_status(world, args)
+    elif command == "export-country":
+        cmd_export_country(world, args)
+    elif command == "export-world":
+        cmd_export_world(world, args)
     elif command == "open":
         cmd_open(world, args)
     elif command == "save":

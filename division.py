@@ -39,6 +39,20 @@ class Division:
     supply_requirement: float
     morale: float = 100.0
     location: str | None = None
+    # equipment_rating is the division's current gear condition; equipment_cap is the ceiling it
+    # can recover to on its own (see main.py's apply_supply_shortfalls). Raising the cap (via
+    # 'set-equipment') doesn't instantly refit the division - it just raises what a few turns of
+    # good supply can climb it back up to. Lowering the cap clamps the current rating down to it.
+    equipment_rating: float = 50.0
+    equipment_cap: float = 50.0
+    # The manpower a division was raised at - what 'recover' restores it to. Left unset (0) at
+    # construction, it's pinned to the starting manpower below; loading a save with an explicit
+    # value (e.g. after the division has already taken losses) keeps that value instead.
+    max_manpower: int = 0
+
+    def __post_init__(self) -> None:
+        if self.max_manpower < self.manpower:
+            self.max_manpower = self.manpower
 
     @classmethod
     def create(
@@ -73,6 +87,9 @@ class Division:
     def get_manpower(self) -> int:
         return self.manpower
 
+    def get_max_manpower(self) -> int:
+        return self.max_manpower
+
     def get_supply_requirement(self) -> float:
         return self.supply_requirement
 
@@ -82,11 +99,16 @@ class Division:
     def get_location(self) -> str | None:
         return self.location
 
+    def get_equipment_rating(self) -> float:
+        return self.equipment_rating
+
+    def get_equipment_cap(self) -> float:
+        return self.equipment_cap
+
 
 @dataclass
 class AirForceDivision(Division):
     aircraft_type: str = ""
-    equipment_rating: float = 0.0
     aircraft_count: int = 0
     range: float = 0.0
 
@@ -112,17 +134,17 @@ class AirForceDivision(Division):
             supply_requirement=supply_requirement,
             morale=morale,
             location=location,
-            aircraft_type=aircraft_type,
+            # A rating specified explicitly at creation counts as a manual set - the division
+            # starts right at its own cap, same as any other manually-set equipment rating.
             equipment_rating=equipment_rating,
+            equipment_cap=equipment_rating,
+            aircraft_type=aircraft_type,
             aircraft_count=aircraft_count,
             range=range,
         )
 
     def get_aircraft_type(self) -> str:
         return self.aircraft_type
-
-    def get_equipment_rating(self) -> float:
-        return self.equipment_rating
 
     def get_aircraft_count(self) -> int:
         return self.aircraft_count

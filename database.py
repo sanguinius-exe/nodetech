@@ -55,10 +55,12 @@ def _division_to_dict(division: Division) -> dict[str, Any]:
         "supply_requirement": division.supply_requirement,
         "morale": division.morale,
         "location": division.location,
+        "equipment_rating": division.equipment_rating,
+        "equipment_cap": division.equipment_cap,
+        "max_manpower": division.max_manpower,
     }
     if isinstance(division, AirForceDivision):
         result["aircraft_type"] = division.aircraft_type
-        result["equipment_rating"] = division.equipment_rating
         result["aircraft_count"] = division.aircraft_count
         result["range"] = division.range
     return result
@@ -74,8 +76,10 @@ def _division_from_dict(data: dict[str, Any]) -> Division:
             supply_requirement=data["supply_requirement"],
             morale=data["morale"],
             location=data["location"],
+            equipment_rating=data.get("equipment_rating", 50.0),
+            equipment_cap=data.get("equipment_cap", data.get("equipment_rating", 50.0)),
+            max_manpower=data.get("max_manpower", data["manpower"]),
             aircraft_type=data.get("aircraft_type", ""),
-            equipment_rating=data.get("equipment_rating", 0.0),
             aircraft_count=data.get("aircraft_count", 0),
             range=data.get("range", 0.0),
         )
@@ -87,6 +91,9 @@ def _division_from_dict(data: dict[str, Any]) -> Division:
         supply_requirement=data["supply_requirement"],
         morale=data["morale"],
         location=data["location"],
+        equipment_rating=data.get("equipment_rating", 50.0),
+        equipment_cap=data.get("equipment_cap", 50.0),
+        max_manpower=data.get("max_manpower", data["manpower"]),
     )
 
 
@@ -112,6 +119,7 @@ def _node_to_dict(node: Node) -> dict[str, Any]:
         "country": node.country,
         "terrain": node.terrain.name,
         "connected_tiles": node.connected_tiles,
+        "rail_connected_tiles": node.rail_connected_tiles,
         "building_options": node.building_options,
         "resources": node.resources,
         "extraction_sites": node.extraction_sites,
@@ -132,6 +140,7 @@ def _node_from_dict(data: dict[str, Any]) -> Node:
         country=data["country"],
         terrain=Terrain[data["terrain"]],
         connected_tiles=data["connected_tiles"],
+        rail_connected_tiles=data.get("rail_connected_tiles", []),
         building_options=data["building_options"],
         resources=data.get("resources", [False] * len(ResourceType)),
         extraction_sites=data.get("extraction_sites", [False] * len(ExtractionSiteType)),
@@ -178,6 +187,7 @@ def save_world(world: Any, path: str) -> None:
         "height": world.height,
         "nodes": {node_id: _node_to_dict(node) for node_id, node in world.nodes.items()},
         "countries": {name: _country_to_dict(country) for name, country in world.countries.items()},
+        "wars": [sorted(pair) for pair in world.wars],
     }
     Path(path).write_text(json.dumps(data, indent=2))
 
@@ -226,5 +236,7 @@ def load_into_world(world: Any, path: str) -> None:
     # world stays usable for adding new nodes; existing nodes just default to (0, 0).
     world.width = data.get("width", 100)
     world.height = data.get("height", 100)
+
+    world.wars = {frozenset(pair) for pair in data.get("wars", [])}
 
     _seed_division_id_counters(world)

@@ -100,6 +100,16 @@ ECONOMIC_GROWTH_EXTRACTION_SITE_MODIFIERS: dict[ExtractionSiteType, float] = {
     ExtractionSiteType.OIL_RIG: 0.02,
 }
 
+# A node's local supply first covers whatever's stationed on it directly; anything left over
+# is what a rail network can pool to cover shortfalls elsewhere (see main.py's
+# apply_supply_shortfalls). Population and GDP are the dominant factors - a thriving, populous
+# node can support (and export) far more supply than a small one; BARRACKS adds a flat bonus on
+# top, the same way it already nudges growth rates.
+NODE_BASE_SUPPLY = 5.0
+POPULATION_SUPPLY_PER_CAPITA = 0.005
+GDP_SUPPLY_PER_OUTPUT = 0.01
+BARRACKS_SUPPLY_BONUS = 5.0
+
 
 @dataclass
 class MilitaryDeployment:
@@ -121,6 +131,7 @@ class Node:
     country: str | None = None
     terrain: Terrain = Terrain.PLAINS
     connected_tiles: list[str] = field(default_factory=list)
+    rail_connected_tiles: list[str] = field(default_factory=list)
     building_options: list[bool] = field(default_factory=lambda: [False] * len(BuildingType))
     resources: list[bool] = field(default_factory=lambda: [False] * len(ResourceType))
     extraction_sites: list[bool] = field(default_factory=lambda: [False] * len(ExtractionSiteType))
@@ -154,6 +165,18 @@ class Node:
 
     def get_connection_count(self) -> int:
         return len(self.connected_tiles)
+
+    def get_rail_connected_tiles(self) -> list[str]:
+        return self.rail_connected_tiles
+
+    def get_local_supply(self) -> float:
+        bonus = BARRACKS_SUPPLY_BONUS if self.has_building(BuildingType.BARRACKS) else 0.0
+        return (
+            NODE_BASE_SUPPLY
+            + self.population * POPULATION_SUPPLY_PER_CAPITA
+            + self.economic_output * GDP_SUPPLY_PER_OUTPUT
+            + bonus
+        )
 
     def get_building_options(self) -> list[bool]:
         return self.building_options
