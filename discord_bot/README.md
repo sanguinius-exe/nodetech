@@ -12,6 +12,9 @@ the read-only ones. That split isn't a new restriction the game didn't already h
 command here is already visible to any CLI/web-terminal user with zero access control, so players
 can freely check any country, not just their own.
 
+Country and node name fields autocomplete against the server's actual world state as you type -
+no more typos into a plain text field for something that already exists.
+
 **Admin - world setup**
 - `/newworld <name> <width> <height> [start_year]` - reset this server's world to a fresh grid
 - `/import <file>` - load an uploaded save file as this server's world, replacing what's there.
@@ -50,6 +53,8 @@ can freely check any country, not just their own.
   `main.py`'s own `map` command and the web terminal use, via `assign_country_colors()`
 - `/botstatus` - the bot process itself: uptime, gateway latency, server count, and the git
   commit it was deployed from (handy for confirming a `git pull` + restart actually took)
+- `/export` - download this server's world as a JSON save file - the counterpart to `/import`,
+  for backups or moving a world to a different server
 
 ## Setup
 
@@ -66,7 +71,9 @@ can freely check any country, not just their own.
    python bot.py
    ```
 
-Slash commands can take a minute to show up the first time Discord syncs them.
+New commands show up almost immediately - the bot syncs its command tree to every server it's
+in individually (see "How it fits together" below) rather than relying on Discord's global sync,
+which can otherwise take up to an hour to reach clients.
 
 ## How it fits together
 
@@ -83,11 +90,15 @@ Slash commands can take a minute to show up the first time Discord syncs them.
 - `map_render.py` renders the grid with Pillow, reusing `main.py`'s own
   `assign_country_colors()`/`MAP_TILE_COLORS`/`MAP_UNCLAIMED_COLOR` rather than a second color
   palette that could drift out of sync with the CLI/web terminal's map.
+- `on_ready`/`on_guild_join` copy the global command tree into a guild-specific override and sync
+  *that* (`tree.copy_global_to(guild=...)` + `tree.sync(guild=...)`) instead of a plain global
+  `tree.sync()`, so command updates show up in seconds rather than waiting on Discord's global
+  propagation.
 
 ## Not yet built
 
-- Autocomplete for node/country names in slash command parameters - right now they're plain text
-  fields, so a typo just gets the same error message the CLI would give.
 - Per-country access control beyond the admin/player split - any admin can act as any country
   (this mirrors how the CLI/web terminal have always worked: the country name is just an
   argument, trusted as given).
+- A confirmation step before `/newworld` or `/import` wipe the current world - both act
+  instantly with no undo, same as the CLI's `new-world`.

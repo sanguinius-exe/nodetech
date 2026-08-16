@@ -168,6 +168,21 @@ async def import_world_async(guild_id: int, content: bytes) -> str:
         return await asyncio.to_thread(import_world, guild_id, content)
 
 
+def export_world(guild_id: int) -> bytes:
+    """The current guild's world as JSON bytes, ready to send as a Discord attachment - saves
+    first to guarantee the file on disk actually matches the in-memory World (covers a guild
+    that's never had a command run yet, which wouldn't have written anything to disk otherwise),
+    then just reads it back rather than re-serializing separately."""
+    get_world(guild_id)
+    save_world(guild_id)
+    return _world_path(guild_id).read_bytes()
+
+
+async def export_world_async(guild_id: int) -> bytes:
+    async with get_lock(guild_id):
+        return await asyncio.to_thread(export_world, guild_id)
+
+
 def run_command(guild_id: int, line: str) -> str:
     """Runs one command line against this guild's World, capturing whatever it prints (the same
     trick the web terminal uses, redirecting Python's stdout instead of a real terminal) and

@@ -13,6 +13,7 @@ a dedicated one yet.
 from __future__ import annotations
 
 import asyncio
+import io
 import math
 import os
 import subprocess
@@ -82,6 +83,18 @@ DIVISION_TYPE_CHOICES = [app_commands.Choice(name=d.name, value=d.name) for d in
 
 def is_admin(interaction: discord.Interaction) -> bool:
     return isinstance(interaction.user, discord.Member) and interaction.user.guild_permissions.manage_guild
+
+
+async def country_autocomplete(interaction: discord.Interaction, current: str) -> list[app_commands.Choice[str]]:
+    world = game_bridge.get_world(interaction.guild_id)
+    matches = [name for name in world.countries if current.lower() in name.lower()]
+    return [app_commands.Choice(name=name, value=name) for name in matches[:25]]
+
+
+async def node_autocomplete(interaction: discord.Interaction, current: str) -> list[app_commands.Choice[str]]:
+    world = game_bridge.get_world(interaction.guild_id)
+    matches = [node_id for node_id in world.nodes if current.lower() in node_id.lower()]
+    return [app_commands.Choice(name=node_id, value=node_id) for node_id in matches[:25]]
 
 
 def chunk_for_discord(text: str) -> list[str]:
@@ -169,6 +182,7 @@ async def create_node(interaction: discord.Interaction, node_id: str, x: int, y:
 
 
 @tree.command(description="Set a node's controlling country (admins only)")
+@app_commands.autocomplete(node_id=node_autocomplete, country=country_autocomplete)
 async def setcountry(interaction: discord.Interaction, node_id: str, country: str) -> None:
     await run_admin_line(interaction, game_bridge.build_line("setcountry", node_id, country))
 
@@ -178,6 +192,7 @@ async def setcountry(interaction: discord.Interaction, node_id: str, country: st
 
 @tree.command(description="Create and deploy a division to a node (admins only)")
 @app_commands.choices(division_type=DIVISION_TYPE_CHOICES)
+@app_commands.autocomplete(node_id=node_autocomplete, country=country_autocomplete)
 async def deploy(
     interaction: discord.Interaction,
     node_id: str,
@@ -194,34 +209,40 @@ async def deploy(
 
 
 @tree.command(description="Move a division to another node - attacks if it's enemy territory (admins only)")
+@app_commands.autocomplete(country=country_autocomplete, destination_id=node_autocomplete)
 async def move_division(interaction: discord.Interaction, country: str, name: str, destination_id: str) -> None:
     line = game_bridge.build_line("move-division", country, name, destination_id)
     await run_admin_line(interaction, line)
 
 
 @tree.command(description="Attack with every division a country has at one node (admins only)")
+@app_commands.autocomplete(country=country_autocomplete, origin_id=node_autocomplete, destination_id=node_autocomplete)
 async def group_attack(interaction: discord.Interaction, country: str, origin_id: str, destination_id: str) -> None:
     line = game_bridge.build_line("group-attack", country, origin_id, destination_id)
     await run_admin_line(interaction, line)
 
 
 @tree.command(description="Put two countries at war (admins only)")
+@app_commands.autocomplete(country_a=country_autocomplete, country_b=country_autocomplete)
 async def declare_war(interaction: discord.Interaction, country_a: str, country_b: str) -> None:
     await run_admin_line(interaction, game_bridge.build_line("declare-war", country_a, country_b))
 
 
 @tree.command(description="End a war between two countries (admins only)")
+@app_commands.autocomplete(country_a=country_autocomplete, country_b=country_autocomplete)
 async def make_peace(interaction: discord.Interaction, country_a: str, country_b: str) -> None:
     await run_admin_line(interaction, game_bridge.build_line("make-peace", country_a, country_b))
 
 
 @tree.command(description="Set a division's equipment cap (admins only)")
+@app_commands.autocomplete(country=country_autocomplete)
 async def set_equipment(interaction: discord.Interaction, country: str, name: str, rating: float) -> None:
     line = game_bridge.build_line("set-equipment", country, name, str(rating))
     await run_admin_line(interaction, line)
 
 
 @tree.command(description="Restore a division to full manpower, morale, and equipment (admins only)")
+@app_commands.autocomplete(country=country_autocomplete)
 async def recover(interaction: discord.Interaction, country: str, name: str) -> None:
     await run_admin_line(interaction, game_bridge.build_line("recover", country, name))
 
@@ -239,6 +260,7 @@ async def admin(interaction: discord.Interaction, command: str) -> None:
 
 @tree.command(description="Assign a Discord member to a country (admins only)")
 @app_commands.describe(member="The player", country="The country they'll control")
+@app_commands.autocomplete(country=country_autocomplete)
 async def assign(interaction: discord.Interaction, member: discord.Member, country: str) -> None:
     if not is_admin(interaction):
         await interaction.response.send_message("Only server admins (Manage Server) can run this.", ephemeral=True)
@@ -266,6 +288,7 @@ async def resolve_country(interaction: discord.Interaction, country: Optional[st
 
 @tree.command(description="Check a country's status - yours by default, or name one")
 @app_commands.describe(country="Country name (defaults to your assigned country)")
+@app_commands.autocomplete(country=country_autocomplete)
 async def status(interaction: discord.Interaction, country: Optional[str] = None) -> None:
     name = await resolve_country(interaction, country)
     if name is None:
@@ -274,12 +297,14 @@ async def status(interaction: discord.Interaction, country: Optional[str] = None
 
 
 @tree.command(description="View a node's full details")
+@app_commands.autocomplete(node_id=node_autocomplete)
 async def view(interaction: discord.Interaction, node_id: str) -> None:
     await run_open_line(interaction, game_bridge.build_line("view", node_id))
 
 
 @tree.command(description="List a country's divisions, deployed and in reserve")
 @app_commands.describe(country="Country name (defaults to your assigned country)")
+@app_commands.autocomplete(country=country_autocomplete)
 async def divisions(interaction: discord.Interaction, country: Optional[str] = None) -> None:
     name = await resolve_country(interaction, country)
     if name is None:
@@ -289,6 +314,7 @@ async def divisions(interaction: discord.Interaction, country: Optional[str] = N
 
 @tree.command(description="List a country's nodes, with position, terrain, population, and output")
 @app_commands.describe(country="Country name (defaults to your assigned country)")
+@app_commands.autocomplete(country=country_autocomplete)
 async def nodes(interaction: discord.Interaction, country: Optional[str] = None) -> None:
     name = await resolve_country(interaction, country)
     if name is None:
@@ -335,10 +361,33 @@ async def map_command(interaction: discord.Interaction) -> None:
     await interaction.followup.send(file=discord.File(buffer, filename="map.png"))
 
 
+@tree.command(description="Download this server's world as a save file")
+async def export(interaction: discord.Interaction) -> None:
+    await interaction.response.defer()
+    async with game_bridge.get_lock(interaction.guild_id):
+        content = await asyncio.to_thread(game_bridge.export_world, interaction.guild_id)
+    file = discord.File(io.BytesIO(content), filename=f"nodetech_{interaction.guild_id}.json")
+    await interaction.followup.send("This server's world:", file=file)
+
+
+async def _sync_to_guild(guild: discord.Guild) -> None:
+    # Global command syncs can take up to an hour to reach clients; copying the global tree into
+    # a guild-specific override and syncing *that* instead shows up there almost immediately -
+    # much better for actually using (and developing) the bot day to day.
+    tree.copy_global_to(guild=guild)
+    await tree.sync(guild=guild)
+
+
 @client.event
 async def on_ready() -> None:
-    await tree.sync()
-    print(f"Logged in as {client.user}")
+    for guild in client.guilds:
+        await _sync_to_guild(guild)
+    print(f"Logged in as {client.user} ({len(client.guilds)} server(s), commands synced)")
+
+
+@client.event
+async def on_guild_join(guild: discord.Guild) -> None:
+    await _sync_to_guild(guild)
 
 
 client.run(TOKEN)
