@@ -1,0 +1,39 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+A macOS launchd LaunchAgent that keeps the bot running in the background - starts it on login,
+restarts it if it crashes. Replace every /path/to/nodetech below with this repo's actual absolute
+path on your machine, then install it:
+
+    cp discord_bot/com.nodetech.discordbot.plist.example ~/Library/LaunchAgents/com.nodetech.discordbot.plist
+    # edit the copy to fill in your actual path
+    launchctl load -w ~/Library/LaunchAgents/com.nodetech.discordbot.plist
+
+To stop it for good (not just kill the current process - KeepAlive would just restart it):
+
+    launchctl unload ~/Library/LaunchAgents/com.nodetech.discordbot.plist
+
+Logs land at discord_bot/bot.log and discord_bot/bot.error.log (gitignored).
+-->
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.nodetech.discordbot</string>
+    <key>ProgramArguments</key>
+    <array>
+        <string>/path/to/nodetech/.venv/bin/python3</string>
+        <string>-u</string>
+        <string>/path/to/nodetech/discord_bot/bot.py</string>
+    </array>
+    <key>WorkingDirectory</key>
+    <string>/path/to/nodetech/discord_bot</string>
+    <key>RunAtLoad</key>
+    <true/>
+    <key>KeepAlive</key>
+    <true/>
+    <key>StandardOutPath</key>
+    <string>/path/to/nodetech/discord_bot/bot.log</string>
+    <key>StandardErrorPath</key>
+    <string>/path/to/nodetech/discord_bot/bot.error.log</string>
+</dict>
+</plist>

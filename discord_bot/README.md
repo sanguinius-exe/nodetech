@@ -42,6 +42,7 @@ can freely check any country, not just their own.
 **Everyone - read-only**
 - `/status [country]` - GDP, population, government, treasury, stability, reserve count
 - `/divisions [country]` - every division, deployed and in reserve, with manpower/morale/equipment
+- `/nodes [country]` - every node a country owns, with position, terrain, population, and output
 - `/view <node_id>` - a node's full details
 - `/world` - every country's GDP/population/nodes in one table
 - `/wars` - every war currently in progress

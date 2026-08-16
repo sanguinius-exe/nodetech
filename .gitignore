@@ -3,3 +3,5 @@ __pycache__/
 *.egg-info/
 discord_bot/.env
 discord_bot/data/
+discord_bot/bot.log
+discord_bot/bot.error.log

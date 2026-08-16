@@ -80,6 +80,7 @@ COMMAND_NAMES = sorted(
         "world",
         "projections",
         "country-divisions",
+        "country-nodes",
         "country-status",
         "export-country",
         "export-world",
@@ -127,6 +128,7 @@ ARG_COMPLETIONS: dict[str, list[str | list[str]]] = {
     "view-country": ["country"],
     "setgovernment": ["country", [g.name.lower() for g in GovernmentType]],
     "country-divisions": ["country"],
+    "country-nodes": ["country"],
     "country-status": ["country"],
     "export-country": ["country"],
     "world": [["status", "divisions"]],
@@ -722,6 +724,28 @@ def cmd_country_divisions(world: World, args: list[str]) -> None:
         return
     for division in divisions:
         print(format_division_line(division))
+
+
+def cmd_country_nodes(world: World, args: list[str]) -> None:
+    if len(args) != 1:
+        print("Usage: country-nodes <country>")
+        return
+    country_name = args[0]
+    country = world.get_country(country_name)
+    if country is None:
+        print(f"No such country '{country_name}'.")
+        return
+    if not country.nodes:
+        print(f"'{country_name}' has no nodes.")
+        return
+    for node_id in country.nodes:
+        node = world.get_node(node_id)
+        if node is None:
+            continue
+        print(
+            f"  {node.get_id()} ({node.get_x()}, {node.get_y()}), {node.get_terrain().name}, "
+            f"population {node.get_population()}, economic output {node.get_economic_output():.2f}"
+        )
 
 
 def cmd_country_status(world: World, args: list[str]) -> None:
@@ -1897,6 +1921,8 @@ def run_command(world: World, raw: str) -> bool:
         cmd_projections(world)
     elif command == "country-divisions":
         cmd_country_divisions(world, args)
+    elif command == "country-nodes":
+        cmd_country_nodes(world, args)
     elif command == "country-status":
         cmd_country_status(world, args)
     elif command == "export-country":

@@ -212,15 +212,25 @@ async def assign(interaction: discord.Interaction, member: discord.Member, count
 # --- Everyone: read-only -----------------------------------------------------------------------
 
 
-@tree.command(description="Check a country's status - yours by default, or name one")
-@app_commands.describe(country="Country name (defaults to your assigned country)")
-async def status(interaction: discord.Interaction, country: Optional[str] = None) -> None:
+async def resolve_country(interaction: discord.Interaction, country: Optional[str]) -> Optional[str]:
+    """The country name a read command should use: whatever was passed explicitly, or the
+    caller's /assign-ed one. Sends the "you don't have one assigned" reply itself and returns
+    None if neither is available, so callers can just bail out on a None return."""
     name = country or game_bridge.get_assigned_country(interaction.guild_id, interaction.user.id)
     if not name:
         await interaction.response.send_message(
             "You don't have a country assigned yet - ask an admin to run /assign, or pass a country name.",
             ephemeral=True,
         )
+        return None
+    return name
+
+
+@tree.command(description="Check a country's status - yours by default, or name one")
+@app_commands.describe(country="Country name (defaults to your assigned country)")
+async def status(interaction: discord.Interaction, country: Optional[str] = None) -> None:
+    name = await resolve_country(interaction, country)
+    if name is None:
         return
     await run_open_line(interaction, game_bridge.build_line("country-status", name))
 
@@ -233,14 +243,19 @@ async def view(interaction: discord.Interaction, node_id: str) -> None:
 @tree.command(description="List a country's divisions, deployed and in reserve")
 @app_commands.describe(country="Country name (defaults to your assigned country)")
 async def divisions(interaction: discord.Interaction, country: Optional[str] = None) -> None:
-    name = country or game_bridge.get_assigned_country(interaction.guild_id, interaction.user.id)
-    if not name:
-        await interaction.response.send_message(
-            "You don't have a country assigned yet - ask an admin to run /assign, or pass a country name.",
-            ephemeral=True,
-        )
+    name = await resolve_country(interaction, country)
+    if name is None:
         return
     await run_open_line(interaction, game_bridge.build_line("country-divisions", name))
+
+
+@tree.command(description="List a country's nodes, with position, terrain, population, and output")
+@app_commands.describe(country="Country name (defaults to your assigned country)")
+async def nodes(interaction: discord.Interaction, country: Optional[str] = None) -> None:
+    name = await resolve_country(interaction, country)
+    if name is None:
+        return
+    await run_open_line(interaction, game_bridge.build_line("country-nodes", name))
 
 
 @tree.command(description="List every country and its GDP/population/nodes")
