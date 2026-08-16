@@ -48,6 +48,8 @@ can freely check any country, not just their own.
 - `/wars` - every war currently in progress
 - `/map` - the world grid as a PNG, one tile per node colored by owning country - same palette
   `main.py`'s own `map` command and the web terminal use, via `assign_country_colors()`
+- `/botstatus` - the bot process itself: uptime, gateway latency, server count, and the git
+  commit it was deployed from (handy for confirming a `git pull` + restart actually took)
 
 ## Setup
 

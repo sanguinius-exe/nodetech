@@ -13,7 +13,11 @@ a dedicated one yet.
 from __future__ import annotations
 
 import asyncio
+import math
 import os
+import subprocess
+from datetime import datetime, timezone
+from pathlib import Path
 from typing import Optional
 
 import discord
@@ -34,6 +38,40 @@ if not TOKEN:
 intents = discord.Intents.default()
 client = discord.Client(intents=intents)
 tree = app_commands.CommandTree(client)
+
+START_TIME = datetime.now(timezone.utc)
+
+
+def _get_git_commit() -> str:
+    """The short commit hash this running instance was deployed from - handy for confirming a
+    deploy actually took (pull + restart) rather than guessing from when the process started."""
+    try:
+        result = subprocess.run(
+            ["git", "rev-parse", "--short", "HEAD"],
+            cwd=Path(__file__).resolve().parent.parent,
+            capture_output=True,
+            text=True,
+            timeout=5,
+            check=True,
+        )
+        return result.stdout.strip()
+    except (OSError, subprocess.SubprocessError):
+        return "unknown"
+
+
+GIT_COMMIT = _get_git_commit()
+
+
+def _format_duration(seconds: float) -> str:
+    total = int(seconds)
+    days, total = divmod(total, 86400)
+    hours, total = divmod(total, 3600)
+    minutes, secs = divmod(total, 60)
+    parts = [f"{days}d"] if days else []
+    parts += [f"{hours}h"] if hours or days else []
+    parts += [f"{minutes}m"] if minutes or hours or days else []
+    parts.append(f"{secs}s")
+    return " ".join(parts)
 
 GOVERNMENT_CHOICES = [app_commands.Choice(name=g.name, value=g.name) for g in GovernmentType]
 # deploy/create-division reject AIR_FORCE (it needs aircraft-specific args deploy-airforce takes
@@ -266,6 +304,20 @@ async def world(interaction: discord.Interaction) -> None:
 @tree.command(description="List every war currently in progress")
 async def wars(interaction: discord.Interaction) -> None:
     await run_open_line(interaction, "wars")
+
+
+@tree.command(name="botstatus", description="Report the bot's own status - uptime, latency, servers, deployed commit")
+async def bot_status(interaction: discord.Interaction) -> None:
+    uptime = datetime.now(timezone.utc) - START_TIME
+    latency_ms = None if math.isnan(client.latency) else round(client.latency * 1000)
+
+    embed = discord.Embed(title="Bot status", color=discord.Color.blurple())
+    embed.add_field(name="Uptime", value=_format_duration(uptime.total_seconds()), inline=True)
+    embed.add_field(name="Latency", value=f"{latency_ms} ms" if latency_ms is not None else "n/a", inline=True)
+    embed.add_field(name="Servers", value=str(len(client.guilds)), inline=True)
+    embed.add_field(name="Started", value=f"<t:{int(START_TIME.timestamp())}:f>", inline=False)
+    embed.set_footer(text=f"nodetech @ {GIT_COMMIT} - discord.py {discord.__version__}")
+    await interaction.response.send_message(embed=embed)
 
 
 @tree.command(name="map", description="Render the world map as an image")
