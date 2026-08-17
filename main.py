@@ -373,7 +373,44 @@ MAP_TILE_GAP_PX = 1
 
 
 def assign_country_colors(world: World) -> dict[str, str]:
-    return {name: MAP_TILE_COLORS[i % len(MAP_TILE_COLORS)] for i, name in enumerate(world.countries)}
+    """One color per country, picked so two countries that actually share a border on the grid
+    never get the same one (an ordinary "cycle through the palette by creation order" scheme
+    will eventually collide on any map with enough countries, and those collisions look like
+    a single blob spanning a border that isn't really there).
+
+    Greedy graph coloring: countries are nodes, an edge connects two whose territory is
+    4-directionally adjacent somewhere on the grid, and each country gets the first palette
+    color none of its already-colored neighbors are using. Processing countries with the most
+    neighbors first (a Welsh-Powell-style heuristic) tends to need fewer distinct colors than
+    processing in an arbitrary order, which matters once the palette (12 colors) is smaller than
+    the country count. If a country somehow borders every other palette color already (only
+    possible with a denser adjacency graph than 12 colors can properly cover), it falls back to
+    cycling the palette by position rather than leaving it uncolored.
+    """
+    if not world.countries:
+        return {}
+
+    grid = {(n.x, n.y): n for n in world.nodes.values()}
+    neighbors: dict[str, set[str]] = {name: set() for name in world.countries}
+    for node in world.nodes.values():
+        if node.country is None:
+            continue
+        for dx, dy in ((1, 0), (-1, 0), (0, 1), (0, -1)):
+            other = grid.get((node.x + dx, node.y + dy))
+            if other is not None and other.country is not None and other.country != node.country:
+                neighbors[node.country].add(other.country)
+
+    order = sorted(world.countries, key=lambda name: -len(neighbors.get(name, ())))
+    colors: dict[str, str] = {}
+    for i, name in enumerate(order):
+        used = {colors[n] for n in neighbors.get(name, ()) if n in colors}
+        available = next((c for c in MAP_TILE_COLORS if c not in used), None)
+        colors[name] = available if available is not None else MAP_TILE_COLORS[i % len(MAP_TILE_COLORS)]
+
+    # Return in the world's own country order (not the degree-sorted order used for the
+    # algorithm above) so every caller that iterates this dict - the map legend, the web
+    # terminal's country list, ... - shows countries in the same order everywhere.
+    return {name: colors[name] for name in world.countries}
 
 
 def _escape_html(text: str) -> str:
@@ -2036,8 +2073,9 @@ def get_current_arg_index(line: str, cursor_pos: int) -> int:
 def get_map_info_panel_data(world: World) -> str:
     """A JSON-serializable summary for the web terminal's info panel: world-level stats plus
     one row per country (name, government, live GDP/population/growth, node and division
-    counts). Returned as a JSON string, not a raw dict, so Pyodide callers get a plain JS
-    object via JSON.parse instead of having to work with a PyProxy."""
+    counts, map color). Returned as a JSON string, not a raw dict, so Pyodide callers get a
+    plain JS object via JSON.parse instead of having to work with a PyProxy."""
+    country_colors = assign_country_colors(world)
     countries = []
     for country in world.countries.values():
         countries.append(
@@ -2050,6 +2088,7 @@ def get_map_info_panel_data(world: World) -> str:
                 "popGrowth": country.calculate_projected_population_growth_rate(world.nodes),
                 "nodes": len(country.nodes),
                 "divisions": len(get_country_divisions(world.nodes, country.name)) + len(country.reserve_divisions),
+                "color": country_colors.get(country.name, MAP_UNCLAIMED_COLOR),
             }
         )
     save_name = Path(world.save_path).stem if world.save_path else "unsaved world"

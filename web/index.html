@@ -962,14 +962,6 @@
     });
     document.getElementById("map-zoom-reset").addEventListener("click", () => resetMapView());
 
-    // Same 12-color palette assign_country_colors() in main.py cycles through, in the same
-    // order (world.countries.values() / get_map_info_panel_data()'s countries list both
-    // follow dict insertion order) - keeps a country's swatch here matching its tile color.
-    const COUNTRY_COLORS = [
-      "#e74c3c", "#2ecc71", "#f1c40f", "#3498db", "#9b59b6", "#1abc9c",
-      "#ff8a80", "#8affab", "#fff176", "#82b1ff", "#ea80fc", "#84ffff",
-    ];
-
     function formatCompact(n) {
       if (n >= 1e9) return (n / 1e9).toFixed(1) + "B";
       if (n >= 1e6) return (n / 1e6).toFixed(1) + "M";
@@ -1011,12 +1003,11 @@
       document.getElementById("info-year").textContent = yearLabel;
 
       const countryCards = data.countries
-        .map((c, i) => {
-          const color = COUNTRY_COLORS[i % COUNTRY_COLORS.length];
+        .map((c) => {
           return (
             '<div class="info-country-card">' +
             '<div class="info-country-card-header"><span class="swatch" style="background:' +
-            color +
+            c.color +
             '"></span><span class="info-country-card-name">' +
             escapeHtml(c.name) +
             "</span></div>" +
