@@ -193,6 +193,23 @@
   #map-zoom-controls button:hover { background: #35353a; }
   #map-zoom-controls #map-zoom-reset { width: auto; height: 24px; font-size: 11px; padding: 0 8px; }
 
+  /* Railroad-overlay toggle, mirroring #map-zoom-controls but in the opposite corner. .active
+     marks it on the same way #pane-splitter marks a drag in progress - a visual pressed state. */
+  #map-overlay-controls { display: none; position: absolute; top: 10px; left: 10px; z-index: 2; }
+  #map-rail-toggle {
+    font-size: 11px;
+    padding: 0 10px;
+    height: 26px;
+    background: rgba(38, 38, 42, 0.9);
+  }
+  #map-rail-toggle:hover { background: #35353a; }
+  #map-rail-toggle.active { background: #e8a33d; color: #1c1c1f; font-weight: 600; }
+
+  /* Fades every tile so the railroad overlay's lines (drawn on top, see #rail-overlay in the
+     script below) read clearly against the map instead of competing with tile colors. */
+  #map-pane.rail-overlay-on #map-scale-wrapper .tile { opacity: 0.35; }
+  #rail-overlay line { stroke: #e8a33d; stroke-width: 2.5; stroke-linecap: round; }
+
   /* Draggable divider between the top row (terminal + map) and the info panel below - resizes
      #info-pane's flex-basis directly off the mouse position, mirroring #pane-splitter's
      horizontal-resize logic but on the vertical axis. */
@@ -408,6 +425,9 @@
           <button type="button" id="map-zoom-in" title="Zoom in">+</button>
           <button type="button" id="map-zoom-out" title="Zoom out">&minus;</button>
           <button type="button" id="map-zoom-reset" title="Reset view">Reset</button>
+        </div>
+        <div id="map-overlay-controls">
+          <button type="button" id="map-rail-toggle" title="Toggle a railroad overlay on a faded map">Railroads</button>
         </div>
       </aside>
     </div>
@@ -659,6 +679,14 @@
       const sourceStyle = doc.querySelector("style");
       styleEl.textContent = sourceStyle ? sourceStyle.textContent : "";
 
+      // build_map_html() embeds every rail-connected pair as inert JSON (harmless on the
+      // standalone page the CLI writes) - pulled out and removed before the generic <script>
+      // removal below, which otherwise would grab this one first since it comes first in
+      // document order.
+      const railEdgesEl = doc.getElementById("rail-edges");
+      mapRailEdges = railEdgesEl ? JSON.parse(railEdgesEl.textContent) : [];
+      if (railEdgesEl) railEdgesEl.remove();
+
       // The map's own <script> (hover-panel wiring) and its .year-badge/.panel are only used
       // by the standalone page the CLI writes - the web terminal drives its own, richer info
       // panel instead (see refreshInfoPanel/renderTileSection below), fed by live
@@ -673,6 +701,7 @@
 
       document.getElementById("map-placeholder").style.display = "none";
       document.getElementById("map-zoom-controls").style.display = "flex";
+      document.getElementById("map-overlay-controls").style.display = "block";
       const wrapper = document.getElementById("map-scale-wrapper");
       wrapper.innerHTML = doc.body.innerHTML;
       // Undo any leftover transform/sizing from a previous render before measuring, so the
@@ -684,6 +713,10 @@
       // zoom/pan math below only need this, not a re-measure, so dragging/zooming stays smooth.
       mapContentSize = { width: wrapper.scrollWidth, height: wrapper.scrollHeight };
       resetMapView();
+
+      // The overlay is user preference, not per-render state - if it was on before this
+      // (re-)render, rebuild it against the fresh tile markup rather than turning it off.
+      if (railOverlayOn) buildRailOverlay();
 
       refreshInfoPanel();
     }
@@ -738,6 +771,70 @@
       mapView.offsetY += dy;
       applyMapTransform();
     }
+
+    // Railroad overlay: draws every rail-connected pair (mapRailEdges, from build_map_html's
+    // embedded #rail-edges JSON - see updateMapPane) as lines over a faded copy of the map,
+    // toggled by #map-rail-toggle. The SVG lives *inside* .map itself (not the outer
+    // #map-scale-wrapper), so it shares .map's own coordinate space and gets carried along by
+    // the same pan/zoom transform as the tiles automatically - no re-drawing needed on zoom/pan,
+    // only when the underlying tile markup actually changes (a fresh `map` render) or the
+    // overlay is first turned on. Tile centers come from offsetLeft/offsetTop rather than
+    // getBoundingClientRect(), since those reflect the tile's position in normal layout flow -
+    // unaffected by the scale() transform applied further up the tree - while a bounding rect
+    // would already be post-transform, on-screen pixels.
+    let mapRailEdges = [];
+    let railOverlayOn = false;
+
+    function buildRailOverlay() {
+      const existing = document.getElementById("rail-overlay");
+      if (existing) existing.remove();
+      const mapEl = document.querySelector("#map-scale-wrapper .map");
+      if (!mapEl || !mapRailEdges.length) return;
+      mapEl.style.position = "relative";
+
+      // One pass over every tile to build id -> center-position, rather than a separate
+      // attribute-selector query per edge endpoint - matters once there are thousands of tiles.
+      const positions = new Map();
+      mapEl.querySelectorAll(".tile[data-id]").forEach((tile) => {
+        positions.set(tile.dataset.id, { x: tile.offsetLeft + tile.offsetWidth / 2, y: tile.offsetTop + tile.offsetHeight / 2 });
+      });
+
+      const svg = document.createElementNS("http://www.w3.org/2000/svg", "svg");
+      svg.id = "rail-overlay";
+      svg.setAttribute("width", mapEl.offsetWidth);
+      svg.setAttribute("height", mapEl.offsetHeight);
+      svg.style.position = "absolute";
+      svg.style.top = "0";
+      svg.style.left = "0";
+      svg.style.pointerEvents = "none";
+
+      for (const [id1, id2] of mapRailEdges) {
+        const p1 = positions.get(id1);
+        const p2 = positions.get(id2);
+        if (!p1 || !p2) continue;
+        const line = document.createElementNS("http://www.w3.org/2000/svg", "line");
+        line.setAttribute("x1", p1.x);
+        line.setAttribute("y1", p1.y);
+        line.setAttribute("x2", p2.x);
+        line.setAttribute("y2", p2.y);
+        svg.appendChild(line);
+      }
+      mapEl.appendChild(svg);
+    }
+
+    function setRailOverlay(on) {
+      railOverlayOn = on;
+      mapPaneEl.classList.toggle("rail-overlay-on", on);
+      document.getElementById("map-rail-toggle").classList.toggle("active", on);
+      if (on) {
+        buildRailOverlay();
+      } else {
+        const existing = document.getElementById("rail-overlay");
+        if (existing) existing.remove();
+      }
+    }
+
+    document.getElementById("map-rail-toggle").addEventListener("click", () => setRailOverlay(!railOverlayOn));
 
     // Drag-to-pan, shared between mouse and single-finger touch. A drag only actually starts
     // panning once the pointer has moved a few pixels (`moved`) - short of that it's treated

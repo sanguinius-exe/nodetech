@@ -510,6 +510,14 @@ def build_map_html(world: World) -> str:
     ]
     default_panel_body = "".join(country_rows) if country_rows else "<p>No countries yet.</p>"
 
+    # Every rail-connected pair, deduped (rail_connected_tiles is symmetric - both ends list each
+    # other) by normalizing each pair to a sorted tuple before adding it to a set. Consumed by the
+    # web terminal's railroad-overlay toggle (see web/index.html); harmless, inert JSON on the
+    # standalone page this function also produces for the CLI's `map` command.
+    rail_edges = sorted(
+        {tuple(sorted((node.id, other_id))) for node in world.nodes.values() for other_id in node.rail_connected_tiles}
+    )
+
     css = MAP_CSS_TEMPLATE.replace("__EMPTY_COLOR__", MAP_EMPTY_COLOR)
 
     return f"""<!doctype html>
@@ -534,6 +542,7 @@ def build_map_html(world: World) -> str:
   <div class="legend">
     {"".join(legend_items)}
   </div>
+  <script id="rail-edges" type="application/json">{json.dumps(rail_edges)}</script>
   <script>{MAP_JS}</script>
 </body>
 </html>
