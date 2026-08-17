@@ -26,6 +26,8 @@ DATA_DIR.mkdir(exist_ok=True)
 _worlds: dict[int, World] = {}
 _assignments: dict[int, dict[int, str]] = {}
 _locks: dict[int, asyncio.Lock] = {}
+_permissions: dict[int, dict[str, list[int]]] = {}
+_pending_snapshots: dict[int, bytes] = {}
 
 
 def get_lock(guild_id: int) -> asyncio.Lock:
@@ -42,6 +44,14 @@ def _world_path(guild_id: int) -> Path:
 
 def _assignments_path(guild_id: int) -> Path:
     return DATA_DIR / f"{guild_id}_players.json"
+
+
+def _permissions_path(guild_id: int) -> Path:
+    return DATA_DIR / f"{guild_id}_permissions.json"
+
+
+def _backup_path(guild_id: int) -> Path:
+    return DATA_DIR / f"{guild_id}_previous.json"
 
 
 def get_world(guild_id: int) -> World:
@@ -62,6 +72,25 @@ def save_world(guild_id: int) -> None:
         database.save_world(world, str(_world_path(guild_id)))
 
 
+def _snapshot_before_switch(guild_id: int) -> bytes | None:
+    """Reads the guild's current save file, right before new-world/import is about to replace
+    it - a copy goes to _backup_path() as a local fallback, and the bytes are returned so the
+    caller can also queue them up (via _pending_snapshots) for the bot to offer as an automatic
+    download. None if there was nothing to back up yet (a guild that's never had a world)."""
+    path = _world_path(guild_id)
+    if not path.exists():
+        return None
+    content = path.read_bytes()
+    _backup_path(guild_id).write_bytes(content)
+    return content
+
+
+def get_pending_snapshot(guild_id: int) -> bytes | None:
+    """The previous world's save bytes, if new-world just replaced one - consumed (popped) on
+    read so a stale snapshot from an earlier switch can't leak into an unrelated later check."""
+    return _pending_snapshots.pop(guild_id, None)
+
+
 def get_assignments(guild_id: int) -> dict[int, str]:
     if guild_id not in _assignments:
         path = _assignments_path(guild_id)
@@ -80,6 +109,48 @@ def assign_country(guild_id: int, user_id: int, country_name: str) -> None:
 
 def get_assigned_country(guild_id: int, user_id: int) -> str | None:
     return get_assignments(guild_id).get(user_id)
+
+
+def get_command_permissions(guild_id: int) -> dict[str, list[int]]:
+    """command name -> role IDs granted to run it, on top of (never instead of) Manage Server -
+    see bot.py's has_permission()."""
+    if guild_id not in _permissions:
+        path = _permissions_path(guild_id)
+        if path.exists():
+            _permissions[guild_id] = json.loads(path.read_text())
+        else:
+            _permissions[guild_id] = {}
+    return _permissions[guild_id]
+
+
+def _save_permissions(guild_id: int) -> None:
+    _permissions_path(guild_id).write_text(json.dumps(get_command_permissions(guild_id)))
+
+
+def permit_role(guild_id: int, command_name: str, role_id: int) -> None:
+    roles = get_command_permissions(guild_id).setdefault(command_name, [])
+    if role_id not in roles:
+        roles.append(role_id)
+        _save_permissions(guild_id)
+
+
+def revoke_role(guild_id: int, command_name: str, role_id: int) -> bool:
+    """Whether the role actually had explicit permission to remove - False means /revoke has
+    nothing to do (it wasn't granted in the first place, not an error)."""
+    perms = get_command_permissions(guild_id)
+    roles = perms.get(command_name, [])
+    if role_id not in roles:
+        return False
+    roles.remove(role_id)
+    if not roles:
+        del perms[command_name]
+    _save_permissions(guild_id)
+    return True
+
+
+def role_has_command_permission(guild_id: int, command_name: str, role_ids: list[int]) -> bool:
+    granted = get_command_permissions(guild_id).get(command_name, [])
+    return any(role_id in granted for role_id in role_ids)
 
 
 def build_line(command: str, *args: str) -> str:
@@ -119,6 +190,10 @@ def _reset_world(guild_id: int, world: World, line: str) -> str:
         except ValueError:
             return "Start year must be an integer."
 
+    snapshot = _snapshot_before_switch(guild_id)
+    if snapshot is not None:
+        _pending_snapshots[guild_id] = snapshot
+
     world.nodes.clear()
     world.countries.clear()
     world.wars.clear()
@@ -131,12 +206,18 @@ def _reset_world(guild_id: int, world: World, line: str) -> str:
     return f"Reset this server's world to '{name}' ({width}x{height} grid, starting year {start_year})."
 
 
-def import_world(guild_id: int, content: bytes) -> str:
+def import_world(guild_id: int, content: bytes) -> tuple[str, bytes | None]:
     """Loads `content` (the raw bytes of an uploaded save file) as this guild's new world,
     replacing whatever it had before - parsed into a temp file first, via the same
     database.load_into_world the CLI's 'open' uses, so a corrupt or non-nodetech upload raises
-    instead of silently clobbering the guild's last-known-good save. Player assignments are
-    cleared too, since they name countries that may not exist in the new world at all."""
+    instead of silently clobbering the guild's last-known-good save (and never gets treated as a
+    real switch, so nothing gets snapshotted for a failed attempt). Player assignments are
+    cleared too, since they name countries that may not exist in the new world at all.
+
+    Returns (confirmation message, the outgoing world's save bytes if one existed) - the bytes
+    are the same thing _reset_world() queues into _pending_snapshots for new-world, just handed
+    back directly here since import already has its own dedicated call path rather than going
+    through the generic string-only run_command()."""
     try:
         text = content.decode("utf-8")
     except UnicodeDecodeError as e:
@@ -153,6 +234,8 @@ def import_world(guild_id: int, content: bytes) -> str:
     finally:
         Path(tmp_path).unlink(missing_ok=True)
 
+    previous = _snapshot_before_switch(guild_id)
+
     world.save_path = None
     _worlds[guild_id] = world
     save_world(guild_id)
@@ -160,10 +243,11 @@ def import_world(guild_id: int, content: bytes) -> str:
     _assignments[guild_id] = {}
     _assignments_path(guild_id).unlink(missing_ok=True)
 
-    return f"Imported world: {len(world.nodes)} nodes, {len(world.countries)} countries. Player assignments were reset."
+    message = f"Imported world: {len(world.nodes)} nodes, {len(world.countries)} countries. Player assignments were reset."
+    return message, previous
 
 
-async def import_world_async(guild_id: int, content: bytes) -> str:
+async def import_world_async(guild_id: int, content: bytes) -> tuple[str, bytes | None]:
     async with get_lock(guild_id):
         return await asyncio.to_thread(import_world, guild_id, content)
 

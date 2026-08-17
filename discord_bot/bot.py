@@ -85,6 +85,42 @@ def is_admin(interaction: discord.Interaction) -> bool:
     return isinstance(interaction.user, discord.Member) and interaction.user.guild_permissions.manage_guild
 
 
+# Every command gated by has_permission() below - the ones /permit/-able. /permit, /revoke, and
+# /permissions themselves are deliberately NOT in here and stay hard-gated to is_admin() alone
+# (see their definitions), so a role granted access to one admin command can never use that
+# access to grant itself - or anyone else - more.
+ADMIN_COMMAND_NAMES = {
+    "newworld",
+    "import",
+    "create_country",
+    "create_node",
+    "setcountry",
+    "deploy",
+    "move_division",
+    "group_attack",
+    "declare_war",
+    "make_peace",
+    "set_equipment",
+    "recover",
+    "advance_year",
+    "admin",
+    "assign",
+}
+
+
+def has_permission(interaction: discord.Interaction) -> bool:
+    """Manage Server always passes. Otherwise, checks whether any role the caller has was
+    granted this specific command via /permit - additive on top of Manage Server, never a
+    replacement for it, so a misconfigured grant (or none at all) can never lock server admins
+    out of their own bot."""
+    if is_admin(interaction):
+        return True
+    if not isinstance(interaction.user, discord.Member) or interaction.command is None:
+        return False
+    role_ids = [role.id for role in interaction.user.roles]
+    return game_bridge.role_has_command_permission(interaction.guild_id, interaction.command.qualified_name, role_ids)
+
+
 async def country_autocomplete(interaction: discord.Interaction, current: str) -> list[app_commands.Choice[str]]:
     world = game_bridge.get_world(interaction.guild_id)
     matches = [name for name in world.countries if current.lower() in name.lower()]
@@ -122,15 +158,33 @@ async def send_chunks(interaction: discord.Interaction, text: str) -> None:
         await interaction.followup.send(chunk)
 
 
+async def send_switch_backup(interaction: discord.Interaction) -> None:
+    """If the command that just ran replaced the world (new-world, whether via /newworld or the
+    raw /admin passthrough), game_bridge queued up the outgoing world's save bytes - post them
+    as an automatic backup download so switching worlds never silently loses the old one, even
+    though a local copy also lands at data/<guild_id>_previous.json."""
+    snapshot = game_bridge.get_pending_snapshot(interaction.guild_id)
+    if snapshot is None:
+        return
+    file = discord.File(io.BytesIO(snapshot), filename=f"nodetech_{interaction.guild_id}_previous.json")
+    await interaction.followup.send("Backup of the world that was just replaced:", file=file)
+
+
 async def run_admin_line(interaction: discord.Interaction, line: str) -> None:
-    """Shared body for every state-changing command: gate on Manage Server, defer (game commands
-    run in a thread and can take a moment - see game_bridge.run_command_async), run, reply."""
-    if not is_admin(interaction):
-        await interaction.response.send_message("Only server admins (Manage Server) can run this.", ephemeral=True)
+    """Shared body for every state-changing command: gate on Manage Server (or a /permit-ed
+    role), defer (game commands run in a thread and can take a moment - see
+    game_bridge.run_command_async), run, reply."""
+    if not has_permission(interaction):
+        await interaction.response.send_message(
+            "You don't have permission to run this - it needs Manage Server, or a role an admin "
+            "has granted with /permit.",
+            ephemeral=True,
+        )
         return
     await interaction.response.defer()
     output = await game_bridge.run_command_async(interaction.guild_id, line)
     await send_chunks(interaction, output)
+    await send_switch_backup(interaction)
 
 
 async def run_open_line(interaction: discord.Interaction, line: str) -> None:
@@ -154,17 +208,24 @@ async def newworld(interaction: discord.Interaction, name: str, width: int, heig
 @tree.command(name="import", description="Load a save file as this server's world, replacing what's there (admins only)")
 @app_commands.describe(file="A nodetech save file (.json) - from the CLI, web terminal, or another server's export")
 async def import_command(interaction: discord.Interaction, file: discord.Attachment) -> None:
-    if not is_admin(interaction):
-        await interaction.response.send_message("Only server admins (Manage Server) can run this.", ephemeral=True)
+    if not has_permission(interaction):
+        await interaction.response.send_message(
+            "You don't have permission to run this - it needs Manage Server, or a role an admin "
+            "has granted with /permit.",
+            ephemeral=True,
+        )
         return
     await interaction.response.defer()
     content = await file.read()
     try:
-        message = await game_bridge.import_world_async(interaction.guild_id, content)
+        message, previous = await game_bridge.import_world_async(interaction.guild_id, content)
     except ValueError as e:
         await interaction.followup.send(f"Import failed: {e}")
         return
     await interaction.followup.send(message)
+    if previous is not None:
+        backup_file = discord.File(io.BytesIO(previous), filename=f"nodetech_{interaction.guild_id}_previous.json")
+        await interaction.followup.send("Backup of the world that was just replaced:", file=backup_file)
 
 
 @tree.command(description="Create a new country (admins only)")
@@ -262,11 +323,71 @@ async def admin(interaction: discord.Interaction, command: str) -> None:
 @app_commands.describe(member="The player", country="The country they'll control")
 @app_commands.autocomplete(country=country_autocomplete)
 async def assign(interaction: discord.Interaction, member: discord.Member, country: str) -> None:
-    if not is_admin(interaction):
-        await interaction.response.send_message("Only server admins (Manage Server) can run this.", ephemeral=True)
+    if not has_permission(interaction):
+        await interaction.response.send_message(
+            "You don't have permission to run this - it needs Manage Server, or a role an admin "
+            "has granted with /permit.",
+            ephemeral=True,
+        )
         return
     game_bridge.assign_country(interaction.guild_id, member.id, country)
     await interaction.response.send_message(f"{member.mention} now controls **{country}**.")
+
+
+async def admin_command_autocomplete(interaction: discord.Interaction, current: str) -> list[app_commands.Choice[str]]:
+    matches = sorted(n for n in ADMIN_COMMAND_NAMES if current.lower() in n.lower())
+    return [app_commands.Choice(name=n, value=n) for n in matches[:25]]
+
+
+# permit/revoke/permissions are deliberately gated on is_admin() directly, never has_permission()
+# - letting a /permit-ed role manage permissions itself would let it grant itself (or anyone)
+# more access than it was actually given, which defeats the whole point of scoping it in the
+# first place. Only real Manage Server holders can touch this.
+
+
+@tree.command(description="Let a role use an admin command, in addition to Manage Server (admins only)")
+@app_commands.describe(command="Which admin command to grant", role="The role to grant it to")
+@app_commands.autocomplete(command=admin_command_autocomplete)
+async def permit(interaction: discord.Interaction, command: str, role: discord.Role) -> None:
+    if not is_admin(interaction):
+        await interaction.response.send_message("Only server admins (Manage Server) can run this.", ephemeral=True)
+        return
+    if command not in ADMIN_COMMAND_NAMES:
+        await interaction.response.send_message(
+            f"'{command}' isn't a permit-able admin command. Use the autocomplete list.", ephemeral=True
+        )
+        return
+    game_bridge.permit_role(interaction.guild_id, command, role.id)
+    await interaction.response.send_message(f"{role.mention} can now use `/{command}` (in addition to Manage Server).")
+
+
+@tree.command(description="Remove a role's granted permission for a command (admins only)")
+@app_commands.describe(command="Which admin command to revoke", role="The role to revoke it from")
+@app_commands.autocomplete(command=admin_command_autocomplete)
+async def revoke(interaction: discord.Interaction, command: str, role: discord.Role) -> None:
+    if not is_admin(interaction):
+        await interaction.response.send_message("Only server admins (Manage Server) can run this.", ephemeral=True)
+        return
+    removed = game_bridge.revoke_role(interaction.guild_id, command, role.id)
+    if not removed:
+        await interaction.response.send_message(
+            f"{role.mention} didn't have an explicit grant for `/{command}` (Manage Server holders can always use it).",
+            ephemeral=True,
+        )
+        return
+    await interaction.response.send_message(f"Removed {role.mention}'s permission for `/{command}`.")
+
+
+@tree.command(description="List every command-specific role permission granted in this server")
+async def permissions(interaction: discord.Interaction) -> None:
+    perms = game_bridge.get_command_permissions(interaction.guild_id)
+    if not perms:
+        await interaction.response.send_message(
+            "No command-specific role grants yet - only Manage Server can run admin commands."
+        )
+        return
+    lines = [f"`/{command}`: {', '.join(f'<@&{role_id}>' for role_id in role_ids)}" for command, role_ids in perms.items()]
+    await interaction.response.send_message("\n".join(lines))
 
 
 # --- Everyone: read-only -----------------------------------------------------------------------
@@ -346,18 +467,25 @@ async def bot_status(interaction: discord.Interaction) -> None:
     await interaction.response.send_message(embed=embed)
 
 
-@tree.command(name="map", description="Render the world map as an image")
-async def map_command(interaction: discord.Interaction) -> None:
+@tree.command(name="map", description="Render the world map as an image, optionally zoomed to one country")
+@app_commands.describe(country="Zoom to just this country's territory (plus a bit of surrounding context)")
+@app_commands.autocomplete(country=country_autocomplete)
+async def map_command(interaction: discord.Interaction, country: Optional[str] = None) -> None:
     await interaction.response.defer()
     world_obj = game_bridge.get_world(interaction.guild_id)
     if not world_obj.nodes:
         await interaction.followup.send("No nodes yet.")
         return
+    title = interaction.guild.name if interaction.guild else None
     # Rendering is synchronous CPU work, same reasoning as run_command_async: offload it so it
     # can't stall the bot's event loop, and hold the guild's lock so it can't race a command
     # that's mutating the same World mid-render.
     async with game_bridge.get_lock(interaction.guild_id):
-        buffer = await asyncio.to_thread(map_render.render_map, world_obj)
+        try:
+            buffer = await asyncio.to_thread(map_render.render_map, world_obj, title, country)
+        except ValueError as e:
+            await interaction.followup.send(str(e))
+            return
     await interaction.followup.send(file=discord.File(buffer, filename="map.png"))
 
 
