@@ -366,6 +366,10 @@ MAP_TILE_COLORS = [
 ]
 MAP_UNCLAIMED_COLOR = "#5a5a63"
 MAP_EMPTY_COLOR = "#232326"
+# The single source of truth for the web map's tile spacing - both the CSS below and the pixel
+# math the railroad overlay does from grid coordinates (see build_map_html's rail_data) have to
+# agree on this, so it's one constant instead of "1px" hardcoded in two places that could drift.
+MAP_TILE_GAP_PX = 1
 
 
 def assign_country_colors(world: World) -> dict[str, str]:
@@ -416,10 +420,10 @@ MAP_CSS_TEMPLATE = """
     flex-direction: column;
     align-items: center;
     background: #1c1c1f;
-    padding: 1px;
+    padding: __TILE_GAP__px;
     flex-shrink: 0;
   }
-  .map-row { display: flex; gap: 1px; margin-bottom: 1px; }
+  .map-row { display: flex; gap: __TILE_GAP__px; margin-bottom: __TILE_GAP__px; }
   .map-row:last-child { margin-bottom: 0; }
   .tile { flex-shrink: 0; }
   .tile:not(.empty):hover { outline: 2px solid #fff; outline-offset: -2px; cursor: default; }
@@ -510,15 +514,28 @@ def build_map_html(world: World) -> str:
     ]
     default_panel_body = "".join(country_rows) if country_rows else "<p>No countries yet.</p>"
 
-    # Every rail-connected pair, deduped (rail_connected_tiles is symmetric - both ends list each
-    # other) by normalizing each pair to a sorted tuple before adding it to a set. Consumed by the
-    # web terminal's railroad-overlay toggle (see web/index.html); harmless, inert JSON on the
-    # standalone page this function also produces for the CLI's `map` command.
-    rail_edges = sorted(
+    # Every rail-connected pair, as grid-coordinate quadruples [x1, y1, x2, y2] rather than ID
+    # pairs - the web terminal's railroad-overlay toggle (see web/index.html) can then place each
+    # line with pure arithmetic (grid coordinate * tile stride) instead of having to look either
+    # node's position up via a DOM query once the map's actually rendered as tiles. Deduped
+    # (rail_connected_tiles is symmetric - both ends list each other) by normalizing each pair to
+    # a sorted ID tuple before adding it to a set, then resolved to coordinates once at the end.
+    rail_edge_ids = sorted(
         {tuple(sorted((node.id, other_id))) for node in world.nodes.values() for other_id in node.rail_connected_tiles}
     )
+    rail_data = {
+        "tileSize": tile_size,
+        "gap": MAP_TILE_GAP_PX,
+        "width": world.width * (tile_size + MAP_TILE_GAP_PX) + MAP_TILE_GAP_PX,
+        "height": world.height * (tile_size + MAP_TILE_GAP_PX) + MAP_TILE_GAP_PX,
+        "edges": [
+            [world.nodes[id1].x, world.nodes[id1].y, world.nodes[id2].x, world.nodes[id2].y]
+            for id1, id2 in rail_edge_ids
+            if id1 in world.nodes and id2 in world.nodes
+        ],
+    }
 
-    css = MAP_CSS_TEMPLATE.replace("__EMPTY_COLOR__", MAP_EMPTY_COLOR)
+    css = MAP_CSS_TEMPLATE.replace("__EMPTY_COLOR__", MAP_EMPTY_COLOR).replace("__TILE_GAP__", str(MAP_TILE_GAP_PX))
 
     return f"""<!doctype html>
 <html>
@@ -542,7 +559,7 @@ def build_map_html(world: World) -> str:
   <div class="legend">
     {"".join(legend_items)}
   </div>
-  <script id="rail-edges" type="application/json">{json.dumps(rail_edges)}</script>
+  <script id="rail-edges" type="application/json">{json.dumps(rail_data)}</script>
   <script>{MAP_JS}</script>
 </body>
 </html>

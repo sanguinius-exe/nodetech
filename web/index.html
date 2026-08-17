@@ -208,7 +208,7 @@
   /* Fades every tile so the railroad overlay's lines (drawn on top, see #rail-overlay in the
      script below) read clearly against the map instead of competing with tile colors. */
   #map-pane.rail-overlay-on #map-scale-wrapper .tile { opacity: 0.35; }
-  #rail-overlay line { stroke: #e8a33d; stroke-width: 2.5; stroke-linecap: round; }
+  #rail-overlay path { fill: none; stroke: #e8a33d; stroke-width: 2.5; stroke-linecap: round; }
 
   /* Draggable divider between the top row (terminal + map) and the info panel below - resizes
      #info-pane's flex-basis directly off the mouse position, mirroring #pane-splitter's
@@ -679,13 +679,14 @@
       const sourceStyle = doc.querySelector("style");
       styleEl.textContent = sourceStyle ? sourceStyle.textContent : "";
 
-      // build_map_html() embeds every rail-connected pair as inert JSON (harmless on the
-      // standalone page the CLI writes) - pulled out and removed before the generic <script>
-      // removal below, which otherwise would grab this one first since it comes first in
-      // document order.
-      const railEdgesEl = doc.getElementById("rail-edges");
-      mapRailEdges = railEdgesEl ? JSON.parse(railEdgesEl.textContent) : [];
-      if (railEdgesEl) railEdgesEl.remove();
+      // build_map_html() embeds every rail-connected pair (as grid-coordinate quadruples, plus
+      // the tile geometry needed to turn those into pixels - see buildRailOverlay) as inert JSON,
+      // harmless on the standalone page the CLI writes. Pulled out and removed before the
+      // generic <script> removal below, which otherwise would grab this one first since it comes
+      // first in document order.
+      const railDataEl = doc.getElementById("rail-edges");
+      mapRailData = railDataEl ? JSON.parse(railDataEl.textContent) : null;
+      if (railDataEl) railDataEl.remove();
 
       // The map's own <script> (hover-panel wiring) and its .year-badge/.panel are only used
       // by the standalone page the CLI writes - the web terminal drives its own, richer info
@@ -772,53 +773,53 @@
       applyMapTransform();
     }
 
-    // Railroad overlay: draws every rail-connected pair (mapRailEdges, from build_map_html's
+    // Railroad overlay: draws every rail-connected pair (mapRailData.edges, from build_map_html's
     // embedded #rail-edges JSON - see updateMapPane) as lines over a faded copy of the map,
     // toggled by #map-rail-toggle. The SVG lives *inside* .map itself (not the outer
     // #map-scale-wrapper), so it shares .map's own coordinate space and gets carried along by
     // the same pan/zoom transform as the tiles automatically - no re-drawing needed on zoom/pan,
     // only when the underlying tile markup actually changes (a fresh `map` render) or the
-    // overlay is first turned on. Tile centers come from offsetLeft/offsetTop rather than
-    // getBoundingClientRect(), since those reflect the tile's position in normal layout flow -
-    // unaffected by the scale() transform applied further up the tree - while a bounding rect
-    // would already be post-transform, on-screen pixels.
-    let mapRailEdges = [];
+    // overlay is first turned on.
+    //
+    // Two things that matter once a world has thousands of tiles and rail links:
+    // - Every edge already carries both endpoints' grid coordinates (not IDs), and mapRailData
+    //   carries the tile size/gap/overall pixel dimensions alongside them - so placing a line is
+    //   pure arithmetic (grid coordinate * tile stride) with zero DOM reads, rather than having
+    //   to scan every rendered .tile element to look node IDs' positions up.
+    // - Every edge becomes one segment of a *single* SVG <path> (multiple "moveto/lineto" pairs
+    //   in its `d` attribute) instead of its own separate <line> element - thousands of distinct
+    //   DOM nodes measurably slows down style/layout/paint in a way one complex path doesn't.
+    let mapRailData = null;
     let railOverlayOn = false;
 
     function buildRailOverlay() {
       const existing = document.getElementById("rail-overlay");
       if (existing) existing.remove();
       const mapEl = document.querySelector("#map-scale-wrapper .map");
-      if (!mapEl || !mapRailEdges.length) return;
+      if (!mapEl || !mapRailData || !mapRailData.edges.length) return;
       mapEl.style.position = "relative";
 
-      // One pass over every tile to build id -> center-position, rather than a separate
-      // attribute-selector query per edge endpoint - matters once there are thousands of tiles.
-      const positions = new Map();
-      mapEl.querySelectorAll(".tile[data-id]").forEach((tile) => {
-        positions.set(tile.dataset.id, { x: tile.offsetLeft + tile.offsetWidth / 2, y: tile.offsetTop + tile.offsetHeight / 2 });
-      });
+      const { tileSize, gap, width, height, edges } = mapRailData;
+      const stride = tileSize + gap;
+      const centerOf = (gridCoord) => gap + gridCoord * stride + tileSize / 2;
+
+      let d = "";
+      for (const [x1, y1, x2, y2] of edges) {
+        d += `M${centerOf(x1)} ${centerOf(y1)} L${centerOf(x2)} ${centerOf(y2)} `;
+      }
 
       const svg = document.createElementNS("http://www.w3.org/2000/svg", "svg");
       svg.id = "rail-overlay";
-      svg.setAttribute("width", mapEl.offsetWidth);
-      svg.setAttribute("height", mapEl.offsetHeight);
+      svg.setAttribute("width", width);
+      svg.setAttribute("height", height);
       svg.style.position = "absolute";
       svg.style.top = "0";
       svg.style.left = "0";
       svg.style.pointerEvents = "none";
 
-      for (const [id1, id2] of mapRailEdges) {
-        const p1 = positions.get(id1);
-        const p2 = positions.get(id2);
-        if (!p1 || !p2) continue;
-        const line = document.createElementNS("http://www.w3.org/2000/svg", "line");
-        line.setAttribute("x1", p1.x);
-        line.setAttribute("y1", p1.y);
-        line.setAttribute("x2", p2.x);
-        line.setAttribute("y2", p2.y);
-        svg.appendChild(line);
-      }
+      const path = document.createElementNS("http://www.w3.org/2000/svg", "path");
+      path.setAttribute("d", d);
+      svg.appendChild(path);
       mapEl.appendChild(svg);
     }
 
