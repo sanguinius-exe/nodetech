@@ -19,16 +19,34 @@ admin) - see the permissions section below.
 Country and node name fields autocomplete against the server's actual world state as you type -
 no more typos into a plain text field for something that already exists.
 
+Every command in the repo root's CLI/README has a dedicated slash command here (see the full
+list below) - `open`, `save`, `list-worlds`, and `rename-world` are the only ones that don't,
+since each guild already has exactly one world, auto-saved after every command; there's no
+per-guild meaning for switching between or renaming named save files. `/admin <command>` is a
+raw passthrough covering anything that still falls outside that (mainly newly-added CLI commands
+that haven't gotten a dedicated slash command yet).
+
 **Admin - world setup**
 - `/newworld <name> <width> <height> [start_year]` - reset this server's world to a fresh grid
 - `/import <file>` - load an uploaded save file as this server's world, replacing what's there.
   Accepts the same JSON format the CLI's `save` command and the web terminal's "Download current
-  save" button produce (not `export-country`/`export-world`'s markdown reports - those aren't
+  save" button produce (not `/export_country`/`/world_report`'s markdown reports - those aren't
   reloadable). Resets any `/assign`ed players too, since they name countries that may not exist
   in the new world.
 - `/create_country <name> [government]`
 - `/create_node <id> <x> <y>`
 - `/setcountry <node_id> <country>`
+- `/connect <node_id_1> <node_id_2>` / `/disconnect <node_id_1> <node_id_2>`
+- `/build_railroad <node_id_1> <node_id_2>` (the two nodes must already be `/connect`ed) /
+  `/remove_railroad <node_id_1> <node_id_2>`
+- `/setterrain <node_id> <terrain>`
+- `/setpopulation <node_id> <population>` / `/setpopgrowth <node_id> <rate>`
+- `/seteconomy <node_id> <output>`
+- `/build <node_id> <building>` / `/unbuild <node_id> <building>`
+- `/addresource <node_id> <resource>` / `/removeresource <node_id> <resource>`
+- `/build_extraction <node_id> <site>` (the node needs the matching resource first) /
+  `/unbuild_extraction <node_id> <site>`
+- `/setgovernment <country> <government>`
 
 Switching worlds (via `/newworld`, `/import`, or `/admin new-world ...`) is never silently
 destructive: whatever world was just replaced gets posted back automatically as a downloadable
@@ -38,19 +56,26 @@ very first `/newworld`/`/import`, since there's no prior world yet to lose.
 
 **Admin - military**
 - `/deploy <node_id> <country> <name> <division_type> <manpower> <supply>`
+- `/create_division <country> <name> <division_type> <manpower> <supply>` - same as `/deploy` but
+  starts in reserve, not deployed to any node
+- `/create_airforce_division <country> <name> <manpower> <supply> <aircraft_type> <equipment_rating> <aircraft_count> <aircraft_range>`
+  / `/deploy_airforce ...` (same args, plus `node_id`, deployed immediately) - AIR_FORCE divisions
+  need these aircraft-specific fields, so they're separate from `/deploy`/`/create_division`
+  rather than a `division_type` choice there
+- `/deploy_reserve <country> <name> <node_id>` - deploy an existing reserve division
 - `/move_division <country> <name> <destination_id>` - attacks instead of relocating if the
   destination is enemy territory
 - `/group_attack <country> <origin_id> <destination_id>` - attacks with every division that
   country has at one node, as a single force
 - `/declare_war <country_a> <country_b>` / `/make_peace <country_a> <country_b>`
 - `/set_equipment <country> <name> <rating>` / `/recover <country> <name>`
-- `/advance_year`
+- `/advance_year` / `/set_year <year>` / `/forceupdate` (recalculates GDP/population from nodes
+  without advancing the year)
 - `/assign <member> <country>` - bind a Discord member to a country, so `/status`/`/divisions`
   default to it for them
 - `/admin <command>` - raw passthrough for anything above that doesn't have its own slash
-  command yet (`setterrain`, `build`, `create-division`, `deploy-reserve`, `create-airforce-division`,
-  `deploy-airforce`, ...) - the full CLI command set works here, exactly as documented in the
-  repo root's README.md
+  command yet - the full CLI command set works here, exactly as documented in the repo root's
+  README.md
 
 **Admin - permissions** (these three always require actual Manage Server, never a `/permit`-ed
 role - otherwise a granted role could grant itself more access than it was actually given)
@@ -61,11 +86,22 @@ role - otherwise a granted role could grant itself more access than it was actua
 
 **Everyone - read-only**
 - `/status [country]` - GDP, population, government, treasury, stability, reserve count
+- `/view_country <country>` - a country's fuller details: government, stability, GDP (with
+  growth), population (with projected growth), every node ID it owns, division count
 - `/divisions [country]` - every division, deployed and in reserve, with manpower/morale/equipment
 - `/nodes [country]` - every node a country owns, with position, terrain, population, and output
 - `/view <node_id>` - a node's full details
+- `/list` - every node's position, owner, and terrain, capped to the first 60 (a full unbounded
+  dump would be hundreds of Discord messages on a large generated world) - use `/nodes <country>`
+  for a complete, uncapped per-country list instead
+- `/list_countries` - every country with its government type and node count
 - `/world` - every country's GDP/population/nodes in one table
+- `/projections` - every country's economic and projected population growth rate
+- `/year` - the current year and years elapsed since the world started
 - `/wars` - every war currently in progress
+- `/buildings` / `/resources` / `/extraction_sites` / `/terrains` / `/division_types` /
+  `/governments` - the fixed vocabulary each of those fields accepts, same as the CLI's own
+  reference-list commands
 - `/map [country]` - the world grid as a PNG, styled to match the CLI/web terminal's map (dark
   background, gridlines between tiles, a "Year N" badge, a wrapped legend) - one tile per node
   colored by owning country, same palette as `assign_country_colors()`. Pass `country` to zoom
@@ -75,6 +111,9 @@ role - otherwise a granted role could grant itself more access than it was actua
   commit it was deployed from (handy for confirming a `git pull` + restart actually took)
 - `/export` - download this server's world as a JSON save file - the counterpart to `/import`,
   for backups or moving a world to a different server
+- `/export_country <country>` / `/world_report` - a country's (or the whole world's) stats as a
+  downloadable markdown report - the Discord equivalent of the CLI's `export-country`/
+  `export-world`, named differently here since `/export` already means the JSON save download
 
 ## Setup
 
@@ -132,6 +171,17 @@ which can otherwise take up to an hour to reach clients.
   file. `_reset_world()` queues its copy into `_pending_snapshots` for `run_admin_line` to pick
   up afterward (since it's funneled through the generic string-only `run_command()`); `import_world()`
   returns its copy directly, since `/import` already has its own dedicated call path.
+- `/export_country`/`/world_report` call `game_bridge.export_country_report()`/
+  `export_world_report()`, which build the markdown report text directly (reusing main.py's own
+  `_country_report_markdown()`/`_world_report_markdown()`) rather than running the CLI's
+  `export-country`/`export-world` commands verbatim - those write to the shared
+  `~/proppunk game files/` directory and stash the path in a process-global (`get_last_export_path()`),
+  which the single-process CLI/web terminal can get away with but would let two guilds exporting
+  around the same time collide or race on each other's file.
+- `/list`'s `LIST_NODES_DISPLAY_CAP` (60) is a Discord-specific cap main.py's own unbounded
+  `list` command doesn't have - `chunk_for_discord` already splits long output into multiple
+  ~1900-character messages, but a large generated world (tens of thousands of nodes) would still
+  mean hundreds of messages sent in a row. `/nodes <country>` has no such cap.
 
 ## Not yet built
 

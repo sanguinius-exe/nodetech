@@ -5,9 +5,12 @@ read-only status checks. That split isn't a new restriction the game didn't alre
 read command (view-country, world status, ...) is already visible to any caller with zero access
 control - it's just gating who can change state.
 
-Most actions have their own slash command for real Discord UX (argument names, choices for fixed
-enums); /admin stays as a raw passthrough for the rest of the CLI's command set that doesn't have
-a dedicated one yet.
+Every CLI command gets its own slash command for real Discord UX (argument names, choices for
+fixed enums, autocomplete on node/country IDs) - except the four that are file/save-model
+concepts with no per-guild equivalent (open, save, list-worlds, rename-world: each guild already
+has exactly one world, auto-saved after every command) and help/quit/exit, which don't apply to
+slash commands at all. /admin is a raw passthrough covering anything that still falls outside
+that - new CLI commands land there automatically until they get a dedicated one of their own.
 """
 
 from __future__ import annotations
@@ -29,6 +32,7 @@ import game_bridge
 import map_render
 from country import GovernmentType
 from division import DivisionType
+from node import BuildingType, ExtractionSiteType, ResourceType, Terrain
 
 load_dotenv()
 
@@ -79,6 +83,16 @@ GOVERNMENT_CHOICES = [app_commands.Choice(name=g.name, value=g.name) for g in Go
 # instead) - main.py enforces this itself, but excluding it here means the dropdown never offers
 # a choice that's guaranteed to fail.
 DIVISION_TYPE_CHOICES = [app_commands.Choice(name=d.name, value=d.name) for d in DivisionType if d.name != "AIR_FORCE"]
+TERRAIN_CHOICES = [app_commands.Choice(name=t.name, value=t.name) for t in Terrain]
+BUILDING_CHOICES = [app_commands.Choice(name=b.name, value=b.name) for b in BuildingType]
+RESOURCE_CHOICES = [app_commands.Choice(name=r.name, value=r.name) for r in ResourceType]
+EXTRACTION_SITE_CHOICES = [app_commands.Choice(name=s.name, value=s.name) for s in ExtractionSiteType]
+
+# How many nodes /list shows before truncating - a full unbounded dump (main.py's own `list`
+# has no such cap) would mean one Discord message per ~35 nodes, so a world the size of a real
+# generated map (tens of thousands of nodes) would flood the channel with hundreds of messages
+# in a row. /nodes <country> covers a full per-country listing without this limit.
+LIST_NODES_DISPLAY_CAP = 60
 
 
 def is_admin(interaction: discord.Interaction) -> bool:
@@ -95,7 +109,26 @@ ADMIN_COMMAND_NAMES = {
     "create_country",
     "create_node",
     "setcountry",
+    "connect",
+    "disconnect",
+    "build_railroad",
+    "remove_railroad",
+    "setterrain",
+    "setpopulation",
+    "setpopgrowth",
+    "seteconomy",
+    "build",
+    "unbuild",
+    "addresource",
+    "removeresource",
+    "build_extraction",
+    "unbuild_extraction",
+    "setgovernment",
     "deploy",
+    "create_division",
+    "create_airforce_division",
+    "deploy_airforce",
+    "deploy_reserve",
     "move_division",
     "group_attack",
     "declare_war",
@@ -103,6 +136,8 @@ ADMIN_COMMAND_NAMES = {
     "set_equipment",
     "recover",
     "advance_year",
+    "set_year",
+    "forceupdate",
     "admin",
     "assign",
 }
@@ -248,6 +283,105 @@ async def setcountry(interaction: discord.Interaction, node_id: str, country: st
     await run_admin_line(interaction, game_bridge.build_line("setcountry", node_id, country))
 
 
+@tree.command(description="Connect two nodes (admins only)")
+@app_commands.autocomplete(node_id_1=node_autocomplete, node_id_2=node_autocomplete)
+async def connect(interaction: discord.Interaction, node_id_1: str, node_id_2: str) -> None:
+    await run_admin_line(interaction, game_bridge.build_line("connect", node_id_1, node_id_2))
+
+
+@tree.command(description="Remove the connection between two nodes (admins only)")
+@app_commands.autocomplete(node_id_1=node_autocomplete, node_id_2=node_autocomplete)
+async def disconnect(interaction: discord.Interaction, node_id_1: str, node_id_2: str) -> None:
+    await run_admin_line(interaction, game_bridge.build_line("disconnect", node_id_1, node_id_2))
+
+
+@tree.command(description="Build a railroad between two already-connected nodes (admins only)")
+@app_commands.autocomplete(node_id_1=node_autocomplete, node_id_2=node_autocomplete)
+async def build_railroad(interaction: discord.Interaction, node_id_1: str, node_id_2: str) -> None:
+    await run_admin_line(interaction, game_bridge.build_line("build-railroad", node_id_1, node_id_2))
+
+
+@tree.command(description="Remove the railroad between two nodes (admins only)")
+@app_commands.autocomplete(node_id_1=node_autocomplete, node_id_2=node_autocomplete)
+async def remove_railroad(interaction: discord.Interaction, node_id_1: str, node_id_2: str) -> None:
+    await run_admin_line(interaction, game_bridge.build_line("remove-railroad", node_id_1, node_id_2))
+
+
+@tree.command(description="Set a node's terrain type (admins only)")
+@app_commands.choices(terrain=TERRAIN_CHOICES)
+@app_commands.autocomplete(node_id=node_autocomplete)
+async def setterrain(interaction: discord.Interaction, node_id: str, terrain: app_commands.Choice[str]) -> None:
+    await run_admin_line(interaction, game_bridge.build_line("setterrain", node_id, terrain.value))
+
+
+@tree.command(description="Set a node's population (admins only)")
+@app_commands.autocomplete(node_id=node_autocomplete)
+async def setpopulation(interaction: discord.Interaction, node_id: str, population: int) -> None:
+    await run_admin_line(interaction, game_bridge.build_line("setpopulation", node_id, str(population)))
+
+
+@tree.command(description="Set a node's population growth rate (admins only)")
+@app_commands.describe(rate="e.g. 0.05 for 5%")
+@app_commands.autocomplete(node_id=node_autocomplete)
+async def setpopgrowth(interaction: discord.Interaction, node_id: str, rate: float) -> None:
+    await run_admin_line(interaction, game_bridge.build_line("setpopgrowth", node_id, str(rate)))
+
+
+@tree.command(description="Set a node's economic output (admins only)")
+@app_commands.autocomplete(node_id=node_autocomplete)
+async def seteconomy(interaction: discord.Interaction, node_id: str, output: float) -> None:
+    await run_admin_line(interaction, game_bridge.build_line("seteconomy", node_id, str(output)))
+
+
+@tree.command(description="Enable a building at a node (admins only)")
+@app_commands.choices(building=BUILDING_CHOICES)
+@app_commands.autocomplete(node_id=node_autocomplete)
+async def build(interaction: discord.Interaction, node_id: str, building: app_commands.Choice[str]) -> None:
+    await run_admin_line(interaction, game_bridge.build_line("build", node_id, building.value))
+
+
+@tree.command(description="Disable a building at a node (admins only)")
+@app_commands.choices(building=BUILDING_CHOICES)
+@app_commands.autocomplete(node_id=node_autocomplete)
+async def unbuild(interaction: discord.Interaction, node_id: str, building: app_commands.Choice[str]) -> None:
+    await run_admin_line(interaction, game_bridge.build_line("unbuild", node_id, building.value))
+
+
+@tree.command(description="Add a resource to a node (admins only)")
+@app_commands.choices(resource=RESOURCE_CHOICES)
+@app_commands.autocomplete(node_id=node_autocomplete)
+async def addresource(interaction: discord.Interaction, node_id: str, resource: app_commands.Choice[str]) -> None:
+    await run_admin_line(interaction, game_bridge.build_line("addresource", node_id, resource.value))
+
+
+@tree.command(description="Remove a resource from a node (admins only)")
+@app_commands.choices(resource=RESOURCE_CHOICES)
+@app_commands.autocomplete(node_id=node_autocomplete)
+async def removeresource(interaction: discord.Interaction, node_id: str, resource: app_commands.Choice[str]) -> None:
+    await run_admin_line(interaction, game_bridge.build_line("removeresource", node_id, resource.value))
+
+
+@tree.command(description="Build an extraction site at a node - needs the matching resource (admins only)")
+@app_commands.choices(site=EXTRACTION_SITE_CHOICES)
+@app_commands.autocomplete(node_id=node_autocomplete)
+async def build_extraction(interaction: discord.Interaction, node_id: str, site: app_commands.Choice[str]) -> None:
+    await run_admin_line(interaction, game_bridge.build_line("build-extraction", node_id, site.value))
+
+
+@tree.command(description="Remove an extraction site from a node (admins only)")
+@app_commands.choices(site=EXTRACTION_SITE_CHOICES)
+@app_commands.autocomplete(node_id=node_autocomplete)
+async def unbuild_extraction(interaction: discord.Interaction, node_id: str, site: app_commands.Choice[str]) -> None:
+    await run_admin_line(interaction, game_bridge.build_line("unbuild-extraction", node_id, site.value))
+
+
+@tree.command(description="Set a country's government type (admins only)")
+@app_commands.choices(government=GOVERNMENT_CHOICES)
+@app_commands.autocomplete(country=country_autocomplete)
+async def setgovernment(interaction: discord.Interaction, country: str, government: app_commands.Choice[str]) -> None:
+    await run_admin_line(interaction, game_bridge.build_line("setgovernment", country, government.value))
+
+
 # --- Admin: military ---------------------------------------------------------------------------
 
 
@@ -267,6 +401,83 @@ async def deploy(
         "deploy", node_id, country, name, division_type.value, str(manpower), str(supply)
     )
     await run_admin_line(interaction, line)
+
+
+@tree.command(description="Create a division in reserve, not deployed to any node (admins only)")
+@app_commands.choices(division_type=DIVISION_TYPE_CHOICES)
+@app_commands.autocomplete(country=country_autocomplete)
+async def create_division(
+    interaction: discord.Interaction,
+    country: str,
+    name: str,
+    division_type: app_commands.Choice[str],
+    manpower: int,
+    supply: float,
+) -> None:
+    line = game_bridge.build_line("create-division", country, name, division_type.value, str(manpower), str(supply))
+    await run_admin_line(interaction, line)
+
+
+@tree.command(description="Create an AIR_FORCE division in reserve (admins only)")
+@app_commands.autocomplete(country=country_autocomplete)
+async def create_airforce_division(
+    interaction: discord.Interaction,
+    country: str,
+    name: str,
+    manpower: int,
+    supply: float,
+    aircraft_type: str,
+    equipment_rating: float,
+    aircraft_count: int,
+    aircraft_range: float,
+) -> None:
+    line = game_bridge.build_line(
+        "create-airforce-division",
+        country,
+        name,
+        str(manpower),
+        str(supply),
+        aircraft_type,
+        str(equipment_rating),
+        str(aircraft_count),
+        str(aircraft_range),
+    )
+    await run_admin_line(interaction, line)
+
+
+@tree.command(description="Create and deploy an AIR_FORCE division to a node (admins only)")
+@app_commands.autocomplete(node_id=node_autocomplete, country=country_autocomplete)
+async def deploy_airforce(
+    interaction: discord.Interaction,
+    node_id: str,
+    country: str,
+    name: str,
+    manpower: int,
+    supply: float,
+    aircraft_type: str,
+    equipment_rating: float,
+    aircraft_count: int,
+    aircraft_range: float,
+) -> None:
+    line = game_bridge.build_line(
+        "deploy-airforce",
+        node_id,
+        country,
+        name,
+        str(manpower),
+        str(supply),
+        aircraft_type,
+        str(equipment_rating),
+        str(aircraft_count),
+        str(aircraft_range),
+    )
+    await run_admin_line(interaction, line)
+
+
+@tree.command(description="Deploy an existing reserve division to a node (admins only)")
+@app_commands.autocomplete(country=country_autocomplete, node_id=node_autocomplete)
+async def deploy_reserve(interaction: discord.Interaction, country: str, name: str, node_id: str) -> None:
+    await run_admin_line(interaction, game_bridge.build_line("deploy-reserve", country, name, node_id))
 
 
 @tree.command(description="Move a division to another node - attacks if it's enemy territory (admins only)")
@@ -311,6 +522,16 @@ async def recover(interaction: discord.Interaction, country: str, name: str) -> 
 @tree.command(description="Advance the world by one year (admins only)")
 async def advance_year(interaction: discord.Interaction) -> None:
     await run_admin_line(interaction, "advance-year")
+
+
+@tree.command(description="Set the current year to a specific value (admins only)")
+async def set_year(interaction: discord.Interaction, year: int) -> None:
+    await run_admin_line(interaction, game_bridge.build_line("set-year", str(year)))
+
+
+@tree.command(description="Recalculate every country's GDP/population from its nodes without advancing the year (admins only)")
+async def forceupdate(interaction: discord.Interaction) -> None:
+    await run_admin_line(interaction, "forceupdate")
 
 
 @tree.command(description="Run a raw game command for anything without its own slash command (admins only)")
@@ -417,6 +638,12 @@ async def status(interaction: discord.Interaction, country: Optional[str] = None
     await run_open_line(interaction, game_bridge.build_line("country-status", name))
 
 
+@tree.command(description="A country's full details - government, stability, GDP, population, every node ID, divisions")
+@app_commands.autocomplete(country=country_autocomplete)
+async def view_country(interaction: discord.Interaction, country: str) -> None:
+    await run_open_line(interaction, game_bridge.build_line("view-country", country))
+
+
 @tree.command(description="View a node's full details")
 @app_commands.autocomplete(node_id=node_autocomplete)
 async def view(interaction: discord.Interaction, node_id: str) -> None:
@@ -443,14 +670,82 @@ async def nodes(interaction: discord.Interaction, country: Optional[str] = None)
     await run_open_line(interaction, game_bridge.build_line("country-nodes", name))
 
 
+@tree.command(name="list", description="List nodes (capped - use /nodes <country> for a complete per-country list)")
+async def list_nodes(interaction: discord.Interaction) -> None:
+    await interaction.response.defer()
+    world_obj = game_bridge.get_world(interaction.guild_id)
+    if not world_obj.nodes:
+        await interaction.followup.send("No nodes yet.")
+        return
+    all_nodes = list(world_obj.nodes.values())
+    lines = [
+        f"  {n.id} ({n.x}, {n.y}) - {n.country or 'unclaimed'} ({n.terrain.name})"
+        for n in all_nodes[:LIST_NODES_DISPLAY_CAP]
+    ]
+    if len(all_nodes) > LIST_NODES_DISPLAY_CAP:
+        lines.append(
+            f"\n...and {len(all_nodes) - LIST_NODES_DISPLAY_CAP} more ({len(all_nodes)} total). "
+            "Use /nodes <country> for a complete, uncapped list."
+        )
+    await send_chunks(interaction, "\n".join(lines))
+
+
+@tree.command(description="List every country, with its government type and node count")
+async def list_countries(interaction: discord.Interaction) -> None:
+    await run_open_line(interaction, "list-countries")
+
+
 @tree.command(description="List every country and its GDP/population/nodes")
 async def world(interaction: discord.Interaction) -> None:
     await run_open_line(interaction, "world status")
 
 
+@tree.command(description="List every country's economic and projected population growth rate")
+async def projections(interaction: discord.Interaction) -> None:
+    await run_open_line(interaction, "projections")
+
+
+@tree.command(description="Show the current year and years elapsed since the world started")
+async def year(interaction: discord.Interaction) -> None:
+    await run_open_line(interaction, "year")
+
+
 @tree.command(description="List every war currently in progress")
 async def wars(interaction: discord.Interaction) -> None:
     await run_open_line(interaction, "wars")
+
+
+# --- Everyone: reference lists ------------------------------------------------------------------
+
+
+@tree.command(description="List available building types")
+async def buildings(interaction: discord.Interaction) -> None:
+    await run_open_line(interaction, "buildings")
+
+
+@tree.command(description="List available resource types")
+async def resources(interaction: discord.Interaction) -> None:
+    await run_open_line(interaction, "resources")
+
+
+@tree.command(description="List available extraction site types")
+async def extraction_sites(interaction: discord.Interaction) -> None:
+    await run_open_line(interaction, "extraction-sites")
+
+
+@tree.command(description="List available terrain types")
+async def terrains(interaction: discord.Interaction) -> None:
+    await run_open_line(interaction, "terrains")
+
+
+@tree.command(description="List available division types")
+async def division_types(interaction: discord.Interaction) -> None:
+    await run_open_line(interaction, "division-types")
+
+
+@tree.command(description="List available government types")
+async def governments(interaction: discord.Interaction) -> None:
+    await run_open_line(interaction, "governments")
 
 
 @tree.command(name="botstatus", description="Report the bot's own status - uptime, latency, servers, deployed commit")
@@ -496,6 +791,37 @@ async def export(interaction: discord.Interaction) -> None:
         content = await asyncio.to_thread(game_bridge.export_world, interaction.guild_id)
     file = discord.File(io.BytesIO(content), filename=f"nodetech_{interaction.guild_id}.json")
     await interaction.followup.send("This server's world:", file=file)
+
+
+# main.py's own `export-country`/`export-world` write a markdown report to disk and are named
+# for the CLI's save/load model - these two are the Discord equivalents, but pulled from
+# game_bridge.export_country_report()/export_world_report() (which build the report text
+# directly) rather than running those commands verbatim, so two guilds exporting at the same
+# time can never collide on the shared ~/proppunk game files/ path or main.py's single
+# process-global "last export" pointer the CLI/web terminal rely on instead.
+
+
+@tree.command(description="Download a country's full report (GDP, population, nodes, divisions) as a markdown file")
+@app_commands.autocomplete(country=country_autocomplete)
+async def export_country(interaction: discord.Interaction, country: str) -> None:
+    await interaction.response.defer()
+    async with game_bridge.get_lock(interaction.guild_id):
+        try:
+            content = await asyncio.to_thread(game_bridge.export_country_report, interaction.guild_id, country)
+        except ValueError as e:
+            await interaction.followup.send(str(e))
+            return
+    file = discord.File(io.BytesIO(content.encode()), filename=f"{country}_report.md")
+    await interaction.followup.send(file=file)
+
+
+@tree.command(description="Download a report of every country's GDP/population/nodes as a markdown file")
+async def world_report(interaction: discord.Interaction) -> None:
+    await interaction.response.defer()
+    async with game_bridge.get_lock(interaction.guild_id):
+        content = await asyncio.to_thread(game_bridge.export_world_report, interaction.guild_id)
+    file = discord.File(io.BytesIO(content.encode()), filename=f"nodetech_{interaction.guild_id}_report.md")
+    await interaction.followup.send(file=file)
 
 
 async def _sync_to_guild(guild: discord.Guild) -> None:

@@ -267,6 +267,25 @@ async def export_world_async(guild_id: int) -> bytes:
         return await asyncio.to_thread(export_world, guild_id)
 
 
+def export_country_report(guild_id: int, country_name: str) -> str:
+    """Markdown report text for one country - the same content main.py's `export-country`
+    writes to disk, generated directly here instead of going through that command (and its
+    shared ~/proppunk game files/<name>_report.md path and process-global _last_export_path)
+    so two guilds exporting around the same time can never race or collide on either. Raises
+    ValueError if the country doesn't exist."""
+    world = get_world(guild_id)
+    country = world.get_country(country_name)
+    if country is None:
+        raise ValueError(f"No such country '{country_name}'.")
+    return game._country_report_markdown(world, country)
+
+
+def export_world_report(guild_id: int) -> str:
+    """Markdown report text for the whole world - see export_country_report for why this
+    bypasses main.py's `export-world` command and its shared save-dir path entirely."""
+    return game._world_report_markdown(get_world(guild_id))
+
+
 def run_command(guild_id: int, line: str) -> str:
     """Runs one command line against this guild's World, capturing whatever it prints (the same
     trick the web terminal uses, redirecting Python's stdout instead of a real terminal) and
