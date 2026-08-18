@@ -350,19 +350,42 @@ def cmd_create(world: World, args: list[str]) -> None:
     print(f"Created node '{node_id}' at ({x}, {y}).")
 
 
+# 15 hues (evenly spaced around the wheel) x 2 tiers (vivid, then a lighter/softer pass over the
+# same 15 hues) - assign_country_colors() picks whichever of these 30 isn't already used by an
+# adjacent country, so more entries here means more of the map's countries actually get a
+# visually distinct color instead of several unrelated, far-apart ones all reusing the same
+# handful of hues just because the old 12-color palette ran out.
 MAP_TILE_COLORS = [
-    "#e74c3c",  # red
-    "#2ecc71",  # green
-    "#f1c40f",  # yellow
-    "#3498db",  # blue
-    "#9b59b6",  # magenta
-    "#1abc9c",  # teal
-    "#ff8a80",  # bright red
-    "#8affab",  # bright green
-    "#fff176",  # bright yellow
-    "#82b1ff",  # bright blue
-    "#ea80fc",  # bright magenta
-    "#84ffff",  # bright teal
+    "#e03e3e",  # vivid red
+    "#e07f3e",  # vivid orange
+    "#e0bf3e",  # vivid amber
+    "#bfe03e",  # vivid yellow-green
+    "#7fe03e",  # vivid lime
+    "#3ee03e",  # vivid green
+    "#3ee07f",  # vivid spring green
+    "#3ee0bf",  # vivid teal
+    "#3ebfe0",  # vivid cyan
+    "#3e7fe0",  # vivid sky blue
+    "#3e3ee0",  # vivid blue
+    "#7f3ee0",  # vivid indigo
+    "#bf3ee0",  # vivid violet
+    "#e03ebf",  # vivid magenta
+    "#e03e7f",  # vivid rose
+    "#e28383",  # soft red
+    "#e2a983",  # soft orange
+    "#e2cf83",  # soft amber
+    "#cfe283",  # soft yellow-green
+    "#a9e283",  # soft lime
+    "#83e283",  # soft green
+    "#83e2a9",  # soft spring green
+    "#83e2cf",  # soft teal
+    "#83cfe2",  # soft cyan
+    "#83a9e2",  # soft sky blue
+    "#8383e2",  # soft blue
+    "#a983e2",  # soft indigo
+    "#cf83e2",  # soft violet
+    "#e283cf",  # soft magenta
+    "#e283a9",  # soft rose
 ]
 MAP_UNCLAIMED_COLOR = "#5a5a63"
 MAP_EMPTY_COLOR = "#232326"
@@ -379,13 +402,19 @@ def assign_country_colors(world: World) -> dict[str, str]:
     a single blob spanning a border that isn't really there).
 
     Greedy graph coloring: countries are nodes, an edge connects two whose territory is
-    4-directionally adjacent somewhere on the grid, and each country gets the first palette
-    color none of its already-colored neighbors are using. Processing countries with the most
-    neighbors first (a Welsh-Powell-style heuristic) tends to need fewer distinct colors than
-    processing in an arbitrary order, which matters once the palette (12 colors) is smaller than
-    the country count. If a country somehow borders every other palette color already (only
-    possible with a denser adjacency graph than 12 colors can properly cover), it falls back to
-    cycling the palette by position rather than leaving it uncolored.
+    4-directionally adjacent somewhere on the grid, and each country gets a palette color none
+    of its already-colored neighbors are using. Processing countries with the most neighbors
+    first (a Welsh-Powell-style heuristic) tends to need fewer distinct colors than processing in
+    an arbitrary order, which matters once the palette is smaller than the country count. If a
+    country somehow borders every other palette color already (only possible with a denser
+    adjacency graph than the palette can properly cover), it falls back to cycling the palette by
+    position rather than leaving it uncolored.
+
+    Among the colors that *are* available for a given country, the least-used-so-far one wins
+    (not just the first one in palette order) - otherwise most countries would pile onto the same
+    handful of early palette entries regardless of how big the palette is, since "first available"
+    only ever looks at each country's immediate neighbors, not the map as a whole. Spreading usage
+    evenly is what actually turns a bigger palette into a more varied-looking map.
     """
     if not world.countries:
         return {}
@@ -401,11 +430,14 @@ def assign_country_colors(world: World) -> dict[str, str]:
                 neighbors[node.country].add(other.country)
 
     order = sorted(world.countries, key=lambda name: -len(neighbors.get(name, ())))
+    usage = {c: 0 for c in MAP_TILE_COLORS}
     colors: dict[str, str] = {}
     for i, name in enumerate(order):
         used = {colors[n] for n in neighbors.get(name, ()) if n in colors}
-        available = next((c for c in MAP_TILE_COLORS if c not in used), None)
-        colors[name] = available if available is not None else MAP_TILE_COLORS[i % len(MAP_TILE_COLORS)]
+        available = [c for c in MAP_TILE_COLORS if c not in used]
+        chosen = min(available, key=lambda c: usage[c]) if available else MAP_TILE_COLORS[i % len(MAP_TILE_COLORS)]
+        colors[name] = chosen
+        usage[chosen] = usage.get(chosen, 0) + 1
 
     # Return in the world's own country order (not the degree-sorted order used for the
     # algorithm above) so every caller that iterates this dict - the map legend, the web
