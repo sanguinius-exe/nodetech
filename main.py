@@ -1494,17 +1494,147 @@ TERRAIN_DEFENSE_MODIFIERS: dict[Terrain, float] = {
     Terrain.URBAN: 1.25,
 }
 
+# How well each division type performs on a given terrain, on top of the blanket
+# TERRAIN_ATTACK/DEFENSE_MODIFIERS above (which apply to everyone equally). This layer is what
+# actually differentiates unit types by terrain: armor wants open ground and struggles the moment
+# it's off it, infantry is the opposite, cavalry is the most terrain-dependent of all, and
+# engineers/airborne are the most terrain-agnostic. Division types with no entry (or terrain with
+# no entry) default to a neutral 1.0 via TERRAIN_TYPE_MODIFIERS.get(...).get(...).
+TERRAIN_TYPE_MODIFIERS: dict[DivisionType, dict[Terrain, float]] = {
+    DivisionType.INFANTRY: {
+        Terrain.PLAINS: 1.0,
+        Terrain.FOREST: 1.2,
+        Terrain.HILLS: 1.1,
+        Terrain.MOUNTAIN: 1.15,
+        Terrain.DESERT: 0.95,
+        Terrain.WATER: 0.8,
+        Terrain.URBAN: 1.2,
+    },
+    DivisionType.ARMOR: {
+        Terrain.PLAINS: 1.3,
+        Terrain.FOREST: 0.7,
+        Terrain.HILLS: 0.85,
+        Terrain.MOUNTAIN: 0.55,
+        Terrain.DESERT: 1.2,
+        Terrain.WATER: 0.5,
+        Terrain.URBAN: 0.7,
+    },
+    DivisionType.ARTILLERY: {
+        Terrain.PLAINS: 1.1,
+        Terrain.FOREST: 0.8,
+        Terrain.HILLS: 1.15,
+        Terrain.MOUNTAIN: 0.75,
+        Terrain.DESERT: 1.0,
+        Terrain.WATER: 0.6,
+        Terrain.URBAN: 0.9,
+    },
+    DivisionType.CAVALRY: {
+        Terrain.PLAINS: 1.35,
+        Terrain.FOREST: 0.75,
+        Terrain.HILLS: 0.95,
+        Terrain.MOUNTAIN: 0.6,
+        Terrain.DESERT: 1.25,
+        Terrain.WATER: 0.5,
+        Terrain.URBAN: 0.65,
+    },
+    DivisionType.AIRBORNE: {
+        Terrain.PLAINS: 1.05,
+        Terrain.FOREST: 1.1,
+        Terrain.HILLS: 1.05,
+        Terrain.MOUNTAIN: 1.1,
+        Terrain.DESERT: 1.0,
+        Terrain.WATER: 0.9,
+        Terrain.URBAN: 1.05,
+    },
+    DivisionType.ENGINEER: {
+        Terrain.PLAINS: 0.9,
+        Terrain.FOREST: 1.0,
+        Terrain.HILLS: 1.0,
+        Terrain.MOUNTAIN: 1.05,
+        Terrain.DESERT: 0.9,
+        Terrain.WATER: 1.1,
+        Terrain.URBAN: 1.25,
+    },
+    DivisionType.LOGISTICS: {
+        # A support type, not a combatant - weak everywhere, terrain doesn't change that.
+        Terrain.PLAINS: 0.6,
+        Terrain.FOREST: 0.6,
+        Terrain.HILLS: 0.6,
+        Terrain.MOUNTAIN: 0.6,
+        Terrain.DESERT: 0.6,
+        Terrain.WATER: 0.6,
+        Terrain.URBAN: 0.6,
+    },
+}
+
+# Tactical matchups: how a division type fares specifically against whichever type makes up the
+# most manpower on the opposing side (see _dominant_type). Not symmetric - MATCHUP_MODIFIERS[A][B]
+# and MATCHUP_MODIFIERS[B][A] are set independently, since "armor vs infantry" and "infantry vs
+# armor" aren't mirror images of the same fight. Unlisted pairs default to a neutral 1.0.
+MATCHUP_MODIFIERS: dict[DivisionType, dict[DivisionType, float]] = {
+    DivisionType.ARMOR: {
+        DivisionType.INFANTRY: 1.25,
+        DivisionType.CAVALRY: 1.2,
+        DivisionType.ARTILLERY: 0.8,
+        DivisionType.ENGINEER: 0.85,
+    },
+    DivisionType.INFANTRY: {
+        DivisionType.ARTILLERY: 1.15,
+        DivisionType.LOGISTICS: 1.3,
+        DivisionType.ARMOR: 0.85,
+    },
+    DivisionType.ARTILLERY: {
+        DivisionType.INFANTRY: 1.2,
+        DivisionType.CAVALRY: 0.85,
+        DivisionType.ARMOR: 0.9,
+    },
+    DivisionType.CAVALRY: {
+        DivisionType.ARTILLERY: 1.3,
+        DivisionType.LOGISTICS: 1.35,
+        DivisionType.INFANTRY: 1.1,
+        DivisionType.ARMOR: 0.7,
+    },
+    DivisionType.AIRBORNE: {
+        DivisionType.LOGISTICS: 1.3,
+        DivisionType.ARTILLERY: 1.2,
+        DivisionType.ARMOR: 0.8,
+    },
+    DivisionType.ENGINEER: {
+        DivisionType.ARMOR: 1.1,
+    },
+}
+
 # Each side's strength is rolled independently within this range, so two otherwise-identical
 # forces don't produce the exact same outcome twice.
 COMBAT_RANDOMNESS_RANGE = (0.85, 1.15)
 
 
-def _combat_strength(division: Division, terrain_modifier: float) -> float:
+def _dominant_type(divisions: list[Division]) -> DivisionType | None:
+    """The type contributing the most combined manpower in a group - used as the "what is this
+    force built to fight" signal for MATCHUP_MODIFIERS. None for an empty list."""
+    totals: dict[DivisionType, int] = {}
+    for division in divisions:
+        totals[division.division_type] = totals.get(division.division_type, 0) + division.manpower
+    if not totals:
+        return None
+    return max(totals, key=lambda dtype: totals[dtype])
+
+
+def _combat_strength(
+    division: Division, terrain: Terrain, is_attacking: bool, enemy_dominant_type: DivisionType | None
+) -> float:
+    terrain_modifier = TERRAIN_ATTACK_MODIFIERS[terrain] if is_attacking else TERRAIN_DEFENSE_MODIFIERS[terrain]
+    terrain_type_modifier = TERRAIN_TYPE_MODIFIERS.get(division.division_type, {}).get(terrain, 1.0)
+    matchup_modifier = 1.0
+    if enemy_dominant_type is not None:
+        matchup_modifier = MATCHUP_MODIFIERS.get(division.division_type, {}).get(enemy_dominant_type, 1.0)
     return (
         division.manpower
         * (division.morale / 100.0)
         * (division.equipment_rating / 100.0)
         * terrain_modifier
+        * terrain_type_modifier
+        * matchup_modifier
         * random.uniform(*COMBAT_RANDOMNESS_RANGE)
     )
 
@@ -1514,24 +1644,42 @@ def resolve_combat(
 ) -> None:
     """One or more attacking divisions - all starting from `origin` - against every division the
     defending country has stationed at `destination`. Casualties are proportional to relative
-    strength (each division's manpower, morale, equipment, and terrain feed into its own combat
-    strength, plus an independent random roll per division) - the weaker side bleeds more, but
-    neither side comes out unscathed, and the resulting loss fraction applies evenly across every
-    division on that side. The attackers only take the node if every defender there is wiped and
-    at least one attacker survives; otherwise survivors retreat to `origin` with whatever losses
-    they took."""
+    strength - each division's manpower, morale, equipment, and an independent random roll all
+    feed into its own combat strength, on top of three layers of terrain/type interactions: the
+    blanket TERRAIN_ATTACK/DEFENSE_MODIFIERS (attacking out of rough terrain is harder, defending
+    in it is easier, for everyone equally), TERRAIN_TYPE_MODIFIERS (how well *this division's
+    type* performs on this specific terrain - armor wants open ground, infantry wants cover),
+    and MATCHUP_MODIFIERS (how this division's type fares against whichever type makes up most of
+    the opposing side's manpower - armor breaks infantry lines but struggles against artillery,
+    cavalry runs down artillery but folds against armor, and so on). The weaker side bleeds more,
+    but neither side comes out unscathed, and the resulting loss fraction applies evenly across
+    every division on that side. The attackers only take the node if every defender there is
+    wiped and at least one attacker survives; otherwise survivors retreat to `origin` with
+    whatever losses they took."""
     defender_country = destination.country
     defending_deployment = next((d for d in destination.military_deployments if d.country == defender_country), None)
     defenders = list(defending_deployment.divisions) if defending_deployment else []
 
-    total_attacker_strength = sum(_combat_strength(d, TERRAIN_ATTACK_MODIFIERS[origin.terrain]) for d in attackers)
-    total_defender_strength = sum(_combat_strength(d, TERRAIN_DEFENSE_MODIFIERS[destination.terrain]) for d in defenders)
+    attacker_dominant_type = _dominant_type(attackers)
+    defender_dominant_type = _dominant_type(defenders)
+
+    total_attacker_strength = sum(
+        _combat_strength(d, origin.terrain, True, defender_dominant_type) for d in attackers
+    )
+    total_defender_strength = sum(
+        _combat_strength(d, destination.terrain, False, attacker_dominant_type) for d in defenders
+    )
     total_strength = total_attacker_strength + total_defender_strength
 
     attacker_names = ", ".join(a.name for a in attackers)
     print(
         f"Battle at '{destination.id}': {len(attackers)} {attacker_country} division(s) [{attacker_names}] "
         f"vs {len(defenders)} {defender_country} division(s)."
+    )
+    print(
+        f"  Terrain: attacking out of {origin.terrain.name} into {destination.terrain.name}. "
+        f"Dominant type - attackers: {attacker_dominant_type.name if attacker_dominant_type else 'none'}, "
+        f"defenders: {defender_dominant_type.name if defender_dominant_type else 'none'}."
     )
     if total_strength <= 0:
         print("  Neither side can fight - the attack fizzles.")
