@@ -93,6 +93,31 @@ TERRAIN_COLORS: dict[str, tuple[int, int, int]] = {
 }
 TERRAIN_OTHER_COUNTRY_COLOR = (48, 48, 44)  # same muted treatment as HEATMAP_OTHER_COUNTRY_COLOR
 
+# render_terrain's division-marker overlay: one dot per country's deployment on a tile (both the
+# target country's own and any other country's, visible within the crop - reading a border means
+# seeing both sides), colored by that country's assign_country_colors() shade (same palette /map
+# uses) and sized by that deployment's total manpower relative to the largest one in view, so a
+# glance shows not just "forces here" but roughly how much. A short type abbreviation (see
+# DIVISION_TYPE_ABBR) for the deployment's dominant type - same "most manpower" rule
+# main.py's _dominant_type() uses for combat matchups - renders on top once the tile is large
+# enough to actually fit text; a "xN" suffix appears too if more than one division is stacked on
+# that tile.
+DIVISION_MARKER_MIN_RADIUS_FRAC = 0.16
+DIVISION_MARKER_MAX_RADIUS_FRAC = 0.42
+DIVISION_MARKER_OUTLINE = (18, 18, 20)
+DIVISION_MARKER_TEXT_MIN_TILE_SIZE = 16
+DIVISION_MARKER_FONT_SIZE = 9
+DIVISION_TYPE_ABBR: dict[str, str] = {
+    "INFANTRY": "INF",
+    "ARMOR": "ARM",
+    "ARTILLERY": "ART",
+    "CAVALRY": "CAV",
+    "AIRBORNE": "ABN",
+    "ENGINEER": "ENG",
+    "LOGISTICS": "LOG",
+    "AIR_FORCE": "AIR",
+}
+
 
 def _heat_color(t: float) -> tuple[int, int, int]:
     """Linear-interpolate HEATMAP_STOPS at t in [0, 1]."""
@@ -216,6 +241,55 @@ def _draw_axis_labels(
             font=axis_font,
             fill=AXIS_COLOR,
         )
+
+
+def _visible_deployments(
+    world: World, min_x: int, min_y: int, max_x: int, max_y: int
+) -> dict[tuple[int, int], list[tuple[str, int, str, int]]]:
+    """(x, y) -> [(country, total_manpower, dominant_type_name, division_count), ...] for every
+    node in bounds with at least one non-empty MilitaryDeployment - one entry per country
+    garrisoning that tile (almost always just one, but a contested tile mid-fight could have
+    more). Used by render_terrain's division-marker overlay."""
+    result: dict[tuple[int, int], list[tuple[str, int, str, int]]] = {}
+    for node in world.nodes.values():
+        if not (min_x <= node.x <= max_x and min_y <= node.y <= max_y):
+            continue
+        entries = []
+        for deployment in node.military_deployments:
+            if not deployment.divisions:
+                continue
+            total_manpower = sum(d.manpower for d in deployment.divisions)
+            dominant = game._dominant_type(deployment.divisions)
+            entries.append((deployment.country, total_manpower, dominant.name if dominant else "", len(deployment.divisions)))
+        if entries:
+            result[(node.x, node.y)] = entries
+    return result
+
+
+def _draw_division_marker(
+    draw: ImageDraw.ImageDraw,
+    scratch: ImageDraw.ImageDraw,
+    marker_font: ImageFont.FreeTypeFont,
+    center: tuple[float, float],
+    radius: float,
+    color: tuple[int, int, int],
+    dominant_type: str,
+    division_count: int,
+    tile_size: int,
+) -> None:
+    cx, cy = center
+    draw.ellipse([cx - radius, cy - radius, cx + radius, cy + radius], fill=color, outline=DIVISION_MARKER_OUTLINE, width=1)
+    if tile_size < DIVISION_MARKER_TEXT_MIN_TILE_SIZE:
+        return
+    label = DIVISION_TYPE_ABBR.get(dominant_type, "?")
+    if division_count > 1:
+        label += f"×{division_count}"
+    text_width = scratch.textlength(label, font=marker_font)
+    # Dark or light label text depending on the marker's own brightness, so it stays legible
+    # against any of assign_country_colors()'s palette rather than just the darker half of it.
+    brightness = 0.299 * color[0] + 0.587 * color[1] + 0.114 * color[2]
+    text_color = (20, 20, 20) if brightness > 140 else (240, 240, 240)
+    draw.text((cx - text_width / 2, cy - DIVISION_MARKER_FONT_SIZE / 2), label, font=marker_font, fill=text_color)
 
 
 def _wrap_legend(names: list[str], font: ImageFont.FreeTypeFont, max_width: float) -> list[list[str]]:
@@ -532,10 +606,19 @@ def render_terrain(world: World, country_name: str, title: Optional[str] = None)
     grid = {(n.x, n.y): n for n in world.nodes.values()}
     own_cells = {(n.x, n.y): n for node_id in country.nodes if (n := world.nodes.get(node_id)) is not None}
 
+    # Division-marker overlay: both the target country's own deployments and any other country's
+    # visible within the crop, so a border reads as a whole rather than just one side of it.
+    deployments = _visible_deployments(world, min_x, min_y, max_x, max_y)
+    country_colors = {name: _hex_to_rgb(color) for name, color in game.assign_country_colors(world).items()}
+    max_manpower = max(
+        (manpower for entries in deployments.values() for (_, manpower, _, _) in entries), default=0
+    )
+
     title_font = ImageFont.load_default(size=TITLE_FONT_SIZE)
     badge_font = ImageFont.load_default(size=BADGE_FONT_SIZE)
     legend_font = ImageFont.load_default(size=LEGEND_FONT_SIZE)
     axis_font = ImageFont.load_default(size=AXIS_FONT_SIZE)
+    marker_font = ImageFont.load_default(size=DIVISION_MARKER_FONT_SIZE)
 
     map_width = region_width * tile_size + (region_width - 1) * TILE_GAP
     map_height = region_height * tile_size + (region_height - 1) * TILE_GAP
@@ -554,6 +637,14 @@ def render_terrain(world: World, country_name: str, title: Optional[str] = None)
     legend_rows = _wrap_legend(legend_names, legend_font, map_width)
     legend_height = LEGEND_TOP_MARGIN + len(legend_rows) * LEGEND_ROW_HEIGHT if legend_rows else 0
 
+    division_country_names = sorted({country for entries in deployments.values() for (country, _, _, _) in entries})
+    division_legend_rows = _wrap_legend(division_country_names, legend_font, map_width)
+    division_legend_height = (
+        LEGEND_TOP_MARGIN + LEGEND_FONT_SIZE + 4 + len(division_legend_rows) * LEGEND_ROW_HEIGHT
+        if division_legend_rows
+        else 0
+    )
+
     year_text = f"Year {world.year}"
     badge_width = scratch.textlength(year_text, font=badge_font) + BADGE_PADDING_X * 2
     badge_height = BADGE_FONT_SIZE + BADGE_PADDING_Y
@@ -561,7 +652,9 @@ def render_terrain(world: World, country_name: str, title: Optional[str] = None)
     header_width = title_width + (30 if title else 0) + badge_width
 
     canvas_width = round(max(content_width, header_width) + PAGE_PADDING * 2)
-    canvas_height = PAGE_PADDING + HEADER_HEIGHT + content_height + legend_height + PAGE_PADDING
+    canvas_height = (
+        PAGE_PADDING + HEADER_HEIGHT + content_height + legend_height + division_legend_height + PAGE_PADDING
+    )
 
     image = Image.new("RGB", (canvas_width, canvas_height), BACKGROUND)
     draw = ImageDraw.Draw(image)
@@ -602,6 +695,27 @@ def render_terrain(world: World, country_name: str, title: Optional[str] = None)
             top = grid_top + (y - min_y) * tile_stride
             draw.rectangle([left, top, left + tile_size - 1, top + tile_size - 1], fill=color)
 
+            entries = deployments.get((x, y))
+            if not entries:
+                continue
+            # More than one country garrisoning the same tile is rare (a contested tile
+            # mid-fight), but when it happens, lay their markers out side by side instead of
+            # stacking them fully on top of each other.
+            slot_width = tile_size / len(entries)
+            for i, (dep_country, manpower, dominant_type, division_count) in enumerate(entries):
+                slot_center_x = left + slot_width * (i + 0.5)
+                slot_center_y = top + tile_size / 2
+                size_t = math.sqrt(manpower / max_manpower) if max_manpower > 0 else 0.0
+                radius = (
+                    DIVISION_MARKER_MIN_RADIUS_FRAC
+                    + (DIVISION_MARKER_MAX_RADIUS_FRAC - DIVISION_MARKER_MIN_RADIUS_FRAC) * size_t
+                ) * min(tile_size, slot_width)
+                marker_color = country_colors.get(dep_country, TEXT_COLOR)
+                _draw_division_marker(
+                    draw, scratch, marker_font, (slot_center_x, slot_center_y), radius, marker_color,
+                    dominant_type, division_count, tile_size,
+                )
+
     legend_y = grid_top + map_height + LEGEND_TOP_MARGIN
     for row in legend_rows:
         x = grid_left
@@ -614,6 +728,23 @@ def render_terrain(world: World, country_name: str, title: Optional[str] = None)
             draw.text((x + LEGEND_SWATCH_SIZE + 6, legend_y), name.title(), font=legend_font, fill=TEXT_COLOR)
             x += LEGEND_SWATCH_SIZE + 6 + draw.textlength(name.title(), font=legend_font) + LEGEND_ITEM_GAP
         legend_y += LEGEND_ROW_HEIGHT
+
+    if division_legend_rows:
+        legend_y += LEGEND_TOP_MARGIN
+        draw.text((grid_left, legend_y), "Divisions", font=legend_font, fill=TEXT_COLOR)
+        legend_y += LEGEND_FONT_SIZE + 4
+        for row in division_legend_rows:
+            x = grid_left
+            for name in row:
+                draw.ellipse(
+                    [x, legend_y + 3, x + LEGEND_SWATCH_SIZE, legend_y + 3 + LEGEND_SWATCH_SIZE],
+                    fill=country_colors.get(name, TEXT_COLOR),
+                    outline=DIVISION_MARKER_OUTLINE,
+                    width=1,
+                )
+                draw.text((x + LEGEND_SWATCH_SIZE + 6, legend_y), name, font=legend_font, fill=TEXT_COLOR)
+                x += LEGEND_SWATCH_SIZE + 6 + draw.textlength(name, font=legend_font) + LEGEND_ITEM_GAP
+            legend_y += LEGEND_ROW_HEIGHT
 
     buffer = io.BytesIO()
     image.save(buffer, format="PNG")
