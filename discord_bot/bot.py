@@ -797,6 +797,37 @@ async def map_command(interaction: discord.Interaction, country: Optional[str] =
     await interaction.followup.send(file=discord.File(buffer, filename="map.png"))
 
 
+HEATMAP_METRIC_CHOICES = [
+    app_commands.Choice(name="Population", value="population"),
+    app_commands.Choice(name="GDP", value="gdp"),
+]
+
+
+@tree.command(description="Render a heatmap of one country's population or GDP, tile by tile")
+@app_commands.describe(country="Which country to show", metric="Population (default) or GDP")
+@app_commands.autocomplete(country=country_autocomplete)
+@app_commands.choices(metric=HEATMAP_METRIC_CHOICES)
+async def heatmap(
+    interaction: discord.Interaction, country: str, metric: Optional[app_commands.Choice[str]] = None
+) -> None:
+    await interaction.response.defer()
+    world_obj = game_bridge.get_world(interaction.guild_id)
+    if not world_obj.nodes:
+        await interaction.followup.send("No nodes yet.")
+        return
+    title = interaction.guild.name if interaction.guild else None
+    metric_value = metric.value if metric else "population"
+    # Same reasoning as /map: offload the render and hold the guild's lock so it can't race a
+    # command mutating the same World mid-render.
+    async with game_bridge.get_lock(interaction.guild_id):
+        try:
+            buffer = await asyncio.to_thread(map_render.render_heatmap, world_obj, country, metric_value, title)
+        except ValueError as e:
+            await interaction.followup.send(str(e))
+            return
+    await interaction.followup.send(file=discord.File(buffer, filename="heatmap.png"))
+
+
 @tree.command(description="Download this server's world as a save file")
 async def export(interaction: discord.Interaction) -> None:
     await interaction.response.defer()

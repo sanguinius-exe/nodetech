@@ -111,6 +111,11 @@ role - otherwise a granted role could grant itself more access than it was actua
   `assign_country_colors()`. Pass `country` to zoom to just that country's own territory plus a
   couple tiles of surrounding context, instead of
   the whole grid.
+- `/heatmap <country> [metric]` - a PNG of just that country's own territory, each tile colored
+  by its population or GDP (`metric`, defaults to population) along a low-to-high gradient scaled
+  to that country's own highest tile - with a color-scale legend at the bottom instead of the
+  country legend `/map` shows. There's no equivalent in the CLI/web terminal (a static image, with
+  no hover to check exact numbers tile-by-tile, is what actually makes a heatmap useful here).
 - `/botstatus` - the bot process itself: uptime, gateway latency, server count, and the git
   commit it was deployed from (handy for confirming a `git pull` + restart actually took)
 - `/export` - download this server's world as a JSON save file - the counterpart to `/import`,
@@ -163,6 +168,13 @@ which can otherwise take up to an hour to reach clients.
   smallest "nice" step (1, 2, 5, 10, 20, ...) that still keeps labels at least ~34px apart at the
   current tile size, so a small country crop labels every tile while a huge world falls back to
   every 5th/10th/50th one instead of printing an unreadable wall of overlapping numbers.
+- `render_heatmap()` (also in `map_render.py`, sharing `_country_bounds`/axis-label code with
+  `render_map`) colors a country's own tiles along a gradient (`HEATMAP_STOPS`) by population or
+  GDP, sqrt-scaled against that country's own highest tile rather than a world-wide scale - a
+  plain linear scale would leave all but the single brightest tile looking nearly identical,
+  since population/GDP within a country typically has a long tail (a few dense "cities" over many
+  sparser tiles). Tiles belonging to other countries are muted rather than colored by their own
+  owner, so the target country's shape and hot spots are what actually stands out.
 - `on_ready`/`on_guild_join` copy the global command tree into a guild-specific override and sync
   *that* (`tree.copy_global_to(guild=...)` + `tree.sync(guild=...)`) instead of a plain global
   `tree.sync()`, so command updates show up in seconds rather than waiting on Discord's global
