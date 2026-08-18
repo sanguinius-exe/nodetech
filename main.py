@@ -1606,6 +1606,26 @@ MATCHUP_MODIFIERS: dict[DivisionType, dict[DivisionType, float]] = {
     },
 }
 
+# Reference rates for a division's supply_requirement: roughly this many supply points per man,
+# scaled by how logistics-hungry that type actually is (armor burns fuel/ammo/maintenance fastest,
+# logistics units themselves are the cheapest to sustain). create-division/create-airforce-division
+# still take supply_requirement as an explicit argument rather than computing it automatically -
+# this is guidance for picking a sensible value (roughly manpower * this rate), not an enforced
+# formula. Paired with node.py's NODE_BASE_SUPPLY/POPULATION_SUPPLY_PER_CAPITA/GDP_SUPPLY_PER_OUTPUT
+# (cut to a third of their original rates alongside this), a sizeable rail-connected garrison can
+# now actually outstrip local supply, instead of any single populated tile trivially covering
+# thousands of divisions on its own.
+DIVISION_SUPPLY_PER_MANPOWER: dict[DivisionType, float] = {
+    DivisionType.LOGISTICS: 1.0,
+    DivisionType.INFANTRY: 1.5,
+    DivisionType.ENGINEER: 2.0,
+    DivisionType.CAVALRY: 2.5,
+    DivisionType.AIRBORNE: 3.0,
+    DivisionType.ARTILLERY: 3.5,
+    DivisionType.AIR_FORCE: 4.0,
+    DivisionType.ARMOR: 5.0,
+}
+
 # Each side's strength is rolled independently within this range, so two otherwise-identical
 # forces don't produce the exact same outcome twice.
 COMBAT_RANDOMNESS_RANGE = (0.85, 1.15)

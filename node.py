@@ -104,11 +104,14 @@ ECONOMIC_GROWTH_EXTRACTION_SITE_MODIFIERS: dict[ExtractionSiteType, float] = {
 # is what a rail network can pool to cover shortfalls elsewhere (see main.py's
 # apply_supply_shortfalls). Population and GDP are the dominant factors - a thriving, populous
 # node can support (and export) far more supply than a small one; BARRACKS adds a flat bonus on
-# top, the same way it already nudges growth rates.
-NODE_BASE_SUPPLY = 5.0
-POPULATION_SUPPLY_PER_CAPITA = 0.005
-GDP_SUPPLY_PER_OUTPUT = 0.01
-BARRACKS_SUPPLY_BONUS = 5.0
+# top, the same way it already nudges growth rates. Cut to a third of the original rates (was
+# 5.0/0.005/0.01/5.0) now that division supply_requirement is scaled to manpower (see
+# main.py's DIVISION_SUPPLY_PER_MANPOWER) rather than small flat numbers - the old rates made
+# local supply so far beyond any plausible demand that a shortfall was effectively impossible.
+NODE_BASE_SUPPLY = 1.67
+POPULATION_SUPPLY_PER_CAPITA = 0.00167
+GDP_SUPPLY_PER_OUTPUT = 0.00333
+BARRACKS_SUPPLY_BONUS = 1.67
 
 
 @dataclass
