@@ -72,6 +72,8 @@ very first `/newworld`/`/import`, since there's no prior world yet to lose.
 - `/set_equipment <country> <name> <rating>` / `/recover <country> <name>`
 - `/advance_year` / `/set_year <year>` / `/forceupdate` (recalculates GDP/population from nodes
   without advancing the year)
+- `/apply_supply` - run one supply iteration (pool rail-connected local supply against deployed
+  divisions' demand, penalize/recover morale and equipment) without advancing the year
 - `/assign <member> <country>` - bind a Discord member to a country, so `/status`/`/divisions`
   default to it for them
 - `/admin <command>` - raw passthrough for anything above that doesn't have its own slash

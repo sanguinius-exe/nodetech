@@ -138,6 +138,7 @@ Every division has a player-given **name** (must be unique within its own countr
 | `advance-year`    | Advance the game by one year                                                                                                                  |
 | `year`            | Show the current year and how many years have passed since the world started                                                                  |
 | `forceupdate`     | Recalculate every country's GDP and population from its nodes, without advancing the year (growth rates are already live and don't need this) |
+| `apply-supply`    | Run one supply iteration (pool rail-connected local supply against deployed divisions' demand, penalize/recover morale and equipment) without advancing the year |
 
 ### Reference lists
 

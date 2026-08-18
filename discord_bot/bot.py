@@ -139,6 +139,7 @@ ADMIN_COMMAND_NAMES = {
     "advance_year",
     "set_year",
     "forceupdate",
+    "apply_supply",
     "admin",
     "assign",
 }
@@ -539,6 +540,11 @@ async def set_year(interaction: discord.Interaction, year: int) -> None:
 @tree.command(description="Recalculate every country's GDP/population from its nodes without advancing the year (admins only)")
 async def forceupdate(interaction: discord.Interaction) -> None:
     await run_admin_line(interaction, "forceupdate")
+
+
+@tree.command(description="Run one supply iteration (penalize/recover division morale and equipment) without advancing the year (admins only)")
+async def apply_supply(interaction: discord.Interaction) -> None:
+    await run_admin_line(interaction, "apply-supply")
 
 
 @tree.command(description="Run a raw game command for anything without its own slash command (admins only)")

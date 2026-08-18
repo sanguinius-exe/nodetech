@@ -78,6 +78,7 @@ COMMAND_NAMES = sorted(
         "set-year",
         "year",
         "forceupdate",
+        "apply-supply",
         "world",
         "projections",
         "country-divisions",
@@ -1732,13 +1733,19 @@ def _rail_cluster(world: World, start: Node, country_name: str) -> list[Node]:
     return cluster
 
 
-def apply_supply_shortfalls(world: World) -> None:
+def apply_supply_shortfalls(world: World) -> tuple[int, int]:
     """Once a year, every node first covers its own divisions from its own local supply
     (Node.get_local_supply()). Whatever's left over - a node with no divisions gives up all of
     it - is pooled across the rest of its rail-connected, same-country cluster and split
     proportionally among any nodes still short. A division whose demand is fully covered (whether
     by its own node or the pool) has its equipment climb toward its cap; anything left unmet dings
-    both morale and equipment, proportional to how much of it went unmet."""
+    both morale and equipment, proportional to how much of it went unmet.
+
+    Returns (divisions_supplied, divisions_short) - purely informational, for callers that want
+    to report what happened (advance-year folds this into its own step; apply-supply is a
+    standalone way to run just this, without also advancing the year - see cmd_apply_supply)."""
+    divisions_supplied = 0
+    divisions_short = 0
     visited: set[str] = set()
     for country_name, country in world.countries.items():
         for node_id in country.nodes:
@@ -1782,17 +1789,21 @@ def apply_supply_shortfalls(world: World) -> None:
                     continue
                 unmet = shortfalls.get(member_id, 0.0) * (1.0 - coverage_ratio)
                 if unmet <= 0:
+                    divisions_supplied += len(divisions)
                     for division in divisions:
                         division.equipment_rating = min(
                             division.equipment_cap, division.equipment_rating + EQUIPMENT_RECOVERY_PER_YEAR
                         )
                     continue
+                divisions_short += len(divisions)
                 penalty_ratio = unmet / local_demand[member_id]
                 morale_penalty = SUPPLY_SHORTFALL_MORALE_PENALTY * penalty_ratio
                 equipment_penalty = SUPPLY_SHORTFALL_EQUIPMENT_PENALTY * penalty_ratio
                 for division in divisions:
                     division.morale = max(0.0, division.morale - morale_penalty)
                     division.equipment_rating = max(0.0, division.equipment_rating - equipment_penalty)
+
+    return divisions_supplied, divisions_short
 
 
 def advance_year(world: World) -> None:
@@ -2030,6 +2041,12 @@ def run_command(world: World, raw: str) -> bool:
     elif command == "forceupdate":
         refresh_country_stats(world)
         print(f"Recalculated stats for {len(world.countries)} countries.")
+    elif command == "apply-supply":
+        supplied, short = apply_supply_shortfalls(world)
+        print(
+            f"Ran a supply iteration: {supplied} division(s) fully supplied, "
+            f"{short} short (morale/equipment penalized)."
+        )
     elif command == "world":
         if args and args[0] == "status":
             cmd_world_status(world)
