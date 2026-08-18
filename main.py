@@ -41,6 +41,7 @@ COMMAND_NAMES = sorted(
         "build-railroad",
         "remove-railroad",
         "setcountry",
+        "unsetcountry",
         "setterrain",
         "setpopulation",
         "setpopgrowth",
@@ -103,6 +104,7 @@ ARG_COMPLETIONS: dict[str, list[str | list[str]]] = {
     "build-railroad": ["node", "node"],
     "remove-railroad": ["node", "node"],
     "setcountry": ["node", "country"],
+    "unsetcountry": ["node"],
     "setterrain": ["node", [t.name.lower() for t in Terrain]],
     "setpopulation": ["node"],
     "setpopgrowth": ["node"],
@@ -738,6 +740,27 @@ def cmd_setcountry(world: World, args: list[str]) -> None:
     if node_id not in country.nodes:
         country.nodes.append(node_id)
     print(f"Node '{node_id}' is now controlled by '{country_name}'.")
+
+
+def cmd_unsetcountry(world: World, args: list[str]) -> None:
+    if len(args) != 1:
+        print("Usage: unsetcountry <id>")
+        return
+    node_id = args[0]
+    node = world.get_node(node_id)
+    if node is None:
+        print(f"No such node '{node_id}'.")
+        return
+    if node.country is None:
+        print(f"Node '{node_id}' is already unclaimed.")
+        return
+
+    old_country = world.get_country(node.country)
+    if old_country is not None and node_id in old_country.nodes:
+        old_country.nodes.remove(node_id)
+
+    node.country = None
+    print(f"Node '{node_id}' is now unclaimed.")
 
 
 def cmd_create_country(world: World, args: list[str]) -> None:
@@ -1919,6 +1942,8 @@ def run_command(world: World, raw: str) -> bool:
         cmd_remove_railroad(world, args)
     elif command == "setcountry":
         cmd_setcountry(world, args)
+    elif command == "unsetcountry":
+        cmd_unsetcountry(world, args)
     elif command == "setterrain":
         cmd_setterrain(world, args)
     elif command == "setpopulation":

@@ -109,6 +109,7 @@ ADMIN_COMMAND_NAMES = {
     "create_country",
     "create_node",
     "setcountry",
+    "unsetcountry",
     "connect",
     "disconnect",
     "build_railroad",
@@ -281,6 +282,12 @@ async def create_node(interaction: discord.Interaction, node_id: str, x: int, y:
 @app_commands.autocomplete(node_id=node_autocomplete, country=country_autocomplete)
 async def setcountry(interaction: discord.Interaction, node_id: str, country: str) -> None:
     await run_admin_line(interaction, game_bridge.build_line("setcountry", node_id, country))
+
+
+@tree.command(description="Clear a node's controlling country, making it unclaimed (admins only)")
+@app_commands.autocomplete(node_id=node_autocomplete)
+async def unsetcountry(interaction: discord.Interaction, node_id: str) -> None:
+    await run_admin_line(interaction, game_bridge.build_line("unsetcountry", node_id))
 
 
 @tree.command(description="Connect two nodes (admins only)")

@@ -93,6 +93,7 @@ Nodes are the map tiles a country controls, and where its economy, population, a
 | `connect <id1> <id2>`             | Connect two nodes                                                                                     |
 | `disconnect <id1> <id2>`          | Remove the connection between two nodes                                                               |
 | `setcountry <id> <country>`       | Set a node's controlling country                                                                      |
+| `unsetcountry <id>`               | Clear a node's controlling country, making it unclaimed                                               |
 | `setterrain <id> <terrain>`       | Set terrain type                                                                                      |
 | `setpopulation <id> <population>` | Set a node's population                                                                               |
 | `setpopgrowth <id> <rate>`        | Set a node's population growth rate                                                                   |

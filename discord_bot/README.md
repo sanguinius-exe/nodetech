@@ -36,6 +36,7 @@ that haven't gotten a dedicated slash command yet).
 - `/create_country <name> [government]`
 - `/create_node <id> <x> <y>`
 - `/setcountry <node_id> <country>`
+- `/unsetcountry <node_id>` - clear a node's controlling country, making it unclaimed
 - `/connect <node_id_1> <node_id_2>` / `/disconnect <node_id_1> <node_id_2>`
 - `/build_railroad <node_id_1> <node_id_2>` (the two nodes must already be `/connect`ed) /
   `/remove_railroad <node_id_1> <node_id_2>`
