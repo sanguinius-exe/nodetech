@@ -1610,6 +1610,43 @@ MATCHUP_MODIFIERS: dict[DivisionType, dict[DivisionType, float]] = {
 # forces don't produce the exact same outcome twice.
 COMBAT_RANDOMNESS_RANGE = (0.85, 1.15)
 
+# A division that survives a battle but has been ground down below this fraction of its
+# max_manpower breaks and pulls back to a friendly neighboring node instead of holding a position
+# it's no longer fit to defend - rather than just sitting there weakened until the next attack
+# finishes it off. Divisions above the threshold hold their ground as before. Only applies to
+# divisions that survive the exchange in the first place; a destroyed division has nothing left to
+# retreat.
+RETREAT_MANPOWER_THRESHOLD = 0.35
+
+
+def _find_friendly_neighbor(world: World, node: Node, country: str) -> Node | None:
+    """The first of `node`'s connected_tiles owned by `country`, or None if there isn't one -
+    where a broken division retreats to. Plain connected_tiles rather than rail_connected_tiles,
+    matching how every other movement command in this engine treats adjacency (rail is only ever
+    special-cased for supply pooling)."""
+    for neighbor_id in node.connected_tiles:
+        neighbor = world.get_node(neighbor_id)
+        if neighbor is not None and neighbor.country == country:
+            return neighbor
+    return None
+
+
+def _retreat_division(
+    from_node: Node, from_deployment: MilitaryDeployment, division: Division, to_node: Node, country: str
+) -> None:
+    """Moves one division from its current deployment to a fresh (or existing) deployment at
+    `to_node`, updating its `.location` - unlike _occupy_node, ownership of either node never
+    changes here, since a retreat isn't a conquest."""
+    from_deployment.divisions.remove(division)
+    if not from_deployment.divisions and from_deployment in from_node.military_deployments:
+        from_node.military_deployments.remove(from_deployment)
+    to_deployment = next((d for d in to_node.military_deployments if d.country == country), None)
+    if to_deployment is None:
+        to_deployment = MilitaryDeployment(country=country)
+        to_node.military_deployments.append(to_deployment)
+    to_deployment.divisions.append(division)
+    division.location = to_node.id
+
 
 def _dominant_type(divisions: list[Division]) -> DivisionType | None:
     """The type contributing the most combined manpower in a group - used as the "what is this
@@ -1656,11 +1693,16 @@ def resolve_combat(
     cavalry runs down artillery but folds against armor, and so on). The weaker side bleeds more,
     but neither side comes out unscathed, and the resulting loss fraction applies evenly across
     every division on that side. The attackers only take the node if every defender there is
-    wiped and at least one attacker survives; otherwise survivors retreat to `origin` with
-    whatever losses they took."""
+    wiped and at least one attacker survives; otherwise attacker survivors retreat to `origin`
+    with whatever losses they took, and any defender survivor ground down below
+    RETREAT_MANPOWER_THRESHOLD breaks and pulls back to a friendly neighboring node rather than
+    holding a position it's no longer fit to defend (see _find_friendly_neighbor) - or holds
+    anyway, mauled, if it has nowhere to go."""
     defender_country = destination.country
     defending_deployment = next((d for d in destination.military_deployments if d.country == defender_country), None)
     defenders = list(defending_deployment.divisions) if defending_deployment else []
+    attacker_manpower_before = sum(d.manpower for d in attackers)
+    defender_manpower_before = sum(d.manpower for d in defenders)
 
     attacker_dominant_type = _dominant_type(attackers)
     defender_dominant_type = _dominant_type(defenders)
@@ -1695,6 +1737,13 @@ def resolve_combat(
     for division in defenders:
         division.manpower = max(0, round(division.manpower * (1 - defender_loss_fraction)))
 
+    attacker_casualties = attacker_manpower_before - sum(d.manpower for d in attackers)
+    defender_casualties = defender_manpower_before - sum(d.manpower for d in defenders)
+    print(
+        f"  Casualties - {attacker_country}: {attacker_casualties:,} ({attacker_loss_fraction:.0%}), "
+        f"{defender_country}: {defender_casualties:,} ({defender_loss_fraction:.0%})."
+    )
+
     destroyed_defenders = [d for d in defenders if d.manpower <= 0]
     surviving_defenders = [d for d in defenders if d.manpower > 0]
     if destroyed_defenders and defending_deployment is not None:
@@ -1727,6 +1776,29 @@ def resolve_combat(
             f"  Attack repelled - {', '.join(f'{d.name} ({d.manpower})' for d in surviving_attackers)} "
             f"retreat to '{origin.id}'."
         )
+        held, retreated, stranded = [], [], []
+        for division in surviving_defenders:
+            if division.manpower / division.max_manpower >= RETREAT_MANPOWER_THRESHOLD:
+                held.append(division)
+                continue
+            target = _find_friendly_neighbor(world, destination, defender_country)
+            if target is None:
+                stranded.append(division)
+                continue
+            _retreat_division(destination, defending_deployment, division, target, defender_country)
+            retreated.append((division, target))
+        if held:
+            print(f"  {defender_country} holds '{destination.id}': {', '.join(f'{d.name} ({d.manpower})' for d in held)}.")
+        if retreated:
+            print(
+                f"  {defender_country} losses too heavy to hold - "
+                f"{', '.join(f'{d.name} ({d.manpower}) falls back to {node.id}' for d, node in retreated)}."
+            )
+        if stranded:
+            print(
+                f"  {defender_country} mauled and cut off, nowhere to retreat - "
+                f"{', '.join(f'{d.name} ({d.manpower})' for d in stranded)} hold '{destination.id}' anyway."
+            )
         return
 
     # Clean sweep: every surviving attacker occupies the node and it changes hands.
@@ -1768,12 +1840,16 @@ def resolve_clash(world: World, country_a: str, node_a: Node, country_b: str, no
     both sides are pressing an assault from their own ground, so both use the ATTACK terrain
     modifiers (from their own node's terrain). Casualties are proportional exactly as in
     resolve_combat. Whichever side is completely wiped loses its node to the other side's
-    survivors, who overrun it; if both sides still have survivors, neither node changes hands -
-    they've simply bloodied each other in the field and both hold their ground."""
+    survivors, who overrun it; if both sides still have survivors, neither node changes hands, but
+    any survivor ground down below RETREAT_MANPOWER_THRESHOLD breaks and pulls back to a friendly
+    neighboring node of its own side rather than holding a position it's no longer fit to defend -
+    or holds anyway, mauled, if it has nowhere to go."""
     deployment_a = next((d for d in node_a.military_deployments if d.country == country_a), None)
     divisions_a = list(deployment_a.divisions) if deployment_a else []
     deployment_b = next((d for d in node_b.military_deployments if d.country == country_b), None)
     divisions_b = list(deployment_b.divisions) if deployment_b else []
+    manpower_before_a = sum(d.manpower for d in divisions_a)
+    manpower_before_b = sum(d.manpower for d in divisions_b)
 
     dominant_a = _dominant_type(divisions_a)
     dominant_b = _dominant_type(divisions_b)
@@ -1804,6 +1880,13 @@ def resolve_clash(world: World, country_a: str, node_a: Node, country_b: str, no
         division.manpower = max(0, round(division.manpower * (1 - loss_fraction_a)))
     for division in divisions_b:
         division.manpower = max(0, round(division.manpower * (1 - loss_fraction_b)))
+
+    casualties_a = manpower_before_a - sum(d.manpower for d in divisions_a)
+    casualties_b = manpower_before_b - sum(d.manpower for d in divisions_b)
+    print(
+        f"  Casualties - {country_a}: {casualties_a:,} ({loss_fraction_a:.0%}), "
+        f"{country_b}: {casualties_b:,} ({loss_fraction_b:.0%})."
+    )
 
     def _cull(divisions: list[Division], deployment: MilitaryDeployment | None, node: Node) -> tuple[list[Division], list[Division]]:
         destroyed = [d for d in divisions if d.manpower <= 0]
@@ -1842,7 +1925,42 @@ def resolve_clash(world: World, country_a: str, node_a: Node, country_b: str, no
         _occupy_node(world, node_b, country_a, country_b, survivors_a)
         print(f"  {country_b}'s force is wiped out - {country_a} overruns '{node_b.id}'.")
         return
+
     print("  Both sides still have forces standing - neither position falls, but both are bloodied.")
+
+    def _sort_survivors(
+        survivors: list[Division], deployment: MilitaryDeployment, node: Node, country: str
+    ) -> tuple[list[Division], list[tuple[Division, Node]], list[Division]]:
+        held, retreated, stranded = [], [], []
+        for division in survivors:
+            if division.manpower / division.max_manpower >= RETREAT_MANPOWER_THRESHOLD:
+                held.append(division)
+                continue
+            target = _find_friendly_neighbor(world, node, country)
+            if target is None:
+                stranded.append(division)
+                continue
+            _retreat_division(node, deployment, division, target, country)
+            retreated.append((division, target))
+        return held, retreated, stranded
+
+    for side_country, side_node, side_survivors, side_deployment in (
+        (country_a, node_a, survivors_a, deployment_a),
+        (country_b, node_b, survivors_b, deployment_b),
+    ):
+        held, retreated, stranded = _sort_survivors(side_survivors, side_deployment, side_node, side_country)
+        if held:
+            print(f"  {side_country} holds '{side_node.id}': {', '.join(f'{d.name} ({d.manpower})' for d in held)}.")
+        if retreated:
+            print(
+                f"  {side_country} losses too heavy to hold - "
+                f"{', '.join(f'{d.name} ({d.manpower}) falls back to {n.id}' for d, n in retreated)}."
+            )
+        if stranded:
+            print(
+                f"  {side_country} mauled and cut off, nowhere to retreat - "
+                f"{', '.join(f'{d.name} ({d.manpower})' for d in stranded)} hold '{side_node.id}' anyway."
+            )
 
 
 def cmd_move_division(world: World, args: list[str]) -> None:
