@@ -38,7 +38,9 @@ HEADER_HEIGHT = 40
 BADGE_PADDING_X = 16
 BADGE_PADDING_Y = 10
 
-AXIS_LABEL_PADDING = 6  # gap between an axis label and the grid edge it's next to
+AXIS_LABEL_PADDING = 6  # outer padding between an axis label's text and the edge of the canvas
+AXIS_TICK_LENGTH = 5  # short mark connecting a label to the exact column/row it's naming
+AXIS_TICK_TEXT_GAP = 3  # gap between the label text and its tick mark
 # "Nice" intervals to space coordinate labels at - the smallest one that still keeps labels at
 # least AXIS_MIN_LABEL_SPACING_PX apart along that axis wins, so a huge world doesn't try to
 # print every single column/row number on top of itself.
@@ -164,8 +166,9 @@ def render_map(world: World, title: Optional[str] = None, country: Optional[str]
     # (e.g. one small country's territory) can be narrower than title + badge need side by side -
     # in which case the canvas widens to fit the header instead of letting them overlap.
     scratch = ImageDraw.Draw(Image.new("RGB", (1, 1)))
-    y_axis_width = round(max(scratch.textlength(str(v), font=axis_font) for v in y_labels) + AXIS_LABEL_PADDING * 2)
-    x_axis_height = AXIS_FONT_SIZE + AXIS_LABEL_PADDING * 2
+    y_label_text_width = max(scratch.textlength(str(v), font=axis_font) for v in y_labels)
+    y_axis_width = round(AXIS_LABEL_PADDING + y_label_text_width + AXIS_TICK_TEXT_GAP + AXIS_TICK_LENGTH)
+    x_axis_height = AXIS_LABEL_PADDING + AXIS_FONT_SIZE + AXIS_TICK_TEXT_GAP + AXIS_TICK_LENGTH
 
     content_width = y_axis_width + map_width
     content_height = x_axis_height + map_height
@@ -219,9 +222,13 @@ def render_map(world: World, title: Optional[str] = None, country: Optional[str]
             grid_top + (y - min_y) * tile_stride + tile_size / 2,
         )
 
+    # Each label gets a short tick mark running from its text to the exact column/row it names,
+    # rather than just floating text near the grid edge - without one it's ambiguous which tile a
+    # label lines up with, especially once labels are spaced several tiles apart.
     for label_x in x_labels:
         cx, _ = tile_center(label_x, min_y)
         text = str(label_x)
+        draw.line([(cx, grid_top - AXIS_TICK_LENGTH), (cx, grid_top)], fill=AXIS_COLOR, width=1)
         draw.text(
             (cx - scratch.textlength(text, font=axis_font) / 2, grid_top - x_axis_height + AXIS_LABEL_PADDING / 2),
             text,
@@ -231,6 +238,7 @@ def render_map(world: World, title: Optional[str] = None, country: Optional[str]
     for label_y in y_labels:
         _, cy = tile_center(min_x, label_y)
         text = str(label_y)
+        draw.line([(grid_left - AXIS_TICK_LENGTH, cy), (grid_left, cy)], fill=AXIS_COLOR, width=1)
         draw.text(
             (grid_left - y_axis_width + AXIS_LABEL_PADDING, cy - AXIS_FONT_SIZE / 2),
             text,
