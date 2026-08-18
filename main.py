@@ -59,6 +59,7 @@ COMMAND_NAMES = sorted(
         "deploy-reserve",
         "move-division",
         "group-attack",
+        "clash",
         "set-equipment",
         "recover",
         "declare-war",
@@ -123,6 +124,7 @@ ARG_COMPLETIONS: dict[str, list[str | list[str]]] = {
     "deploy-reserve": ["country", [], "node"],
     "move-division": ["country", [], "node"],
     "group-attack": ["country", "node", "node"],
+    "clash": ["country", "node", "country", "node"],
     "set-equipment": ["country", []],
     "recover": ["country", []],
     "declare-war": ["country", "country"],
@@ -1730,25 +1732,117 @@ def resolve_combat(
     # Clean sweep: every surviving attacker occupies the node and it changes hands.
     for division in surviving_attackers:
         _remove_from_origin(division)
-    new_deployment = next((d for d in destination.military_deployments if d.country == attacker_country), None)
-    if new_deployment is None:
-        new_deployment = MilitaryDeployment(country=attacker_country)
-        destination.military_deployments.append(new_deployment)
-    for division in surviving_attackers:
-        new_deployment.divisions.append(division)
-        division.location = destination.id
-
-    old_owner = world.get_country(defender_country) if defender_country else None
-    if old_owner is not None and destination.id in old_owner.nodes:
-        old_owner.nodes.remove(destination.id)
-    destination.country = attacker_country
-    new_owner = world.get_country(attacker_country)
-    if new_owner is not None and destination.id not in new_owner.nodes:
-        new_owner.nodes.append(destination.id)
+    _occupy_node(world, destination, attacker_country, defender_country, surviving_attackers)
     print(
         f"  '{destination.id}' falls to {attacker_country} - "
         f"{', '.join(f'{d.name} ({d.manpower})' for d in surviving_attackers)} occupy it."
     )
+
+
+def _occupy_node(world: World, node: Node, new_owner: str, old_owner: str | None, divisions: list[Division]) -> None:
+    """Installs `divisions` (already detached from wherever they used to be) as `node`'s garrison
+    for `new_owner`, updates each division's `.location`, and transfers `node` itself from
+    `old_owner` to `new_owner`. Shared by resolve_combat's clean-sweep case and resolve_clash's
+    overrun case - both end with "this side's survivors now hold what used to be the other
+    side's ground"."""
+    new_deployment = next((d for d in node.military_deployments if d.country == new_owner), None)
+    if new_deployment is None:
+        new_deployment = MilitaryDeployment(country=new_owner)
+        node.military_deployments.append(new_deployment)
+    for division in divisions:
+        new_deployment.divisions.append(division)
+        division.location = node.id
+
+    old_country = world.get_country(old_owner) if old_owner else None
+    if old_country is not None and node.id in old_country.nodes:
+        old_country.nodes.remove(node.id)
+    node.country = new_owner
+    new_country = world.get_country(new_owner)
+    if new_country is not None and node.id not in new_country.nodes:
+        new_country.nodes.append(node.id)
+
+
+def resolve_clash(world: World, country_a: str, node_a: Node, country_b: str, node_b: Node) -> None:
+    """A mutual engagement between two forces that are *both* on the attack - unlike
+    resolve_combat, where one side is a static defender getting TERRAIN_DEFENSE_MODIFIERS, here
+    both sides are pressing an assault from their own ground, so both use the ATTACK terrain
+    modifiers (from their own node's terrain). Casualties are proportional exactly as in
+    resolve_combat. Whichever side is completely wiped loses its node to the other side's
+    survivors, who overrun it; if both sides still have survivors, neither node changes hands -
+    they've simply bloodied each other in the field and both hold their ground."""
+    deployment_a = next((d for d in node_a.military_deployments if d.country == country_a), None)
+    divisions_a = list(deployment_a.divisions) if deployment_a else []
+    deployment_b = next((d for d in node_b.military_deployments if d.country == country_b), None)
+    divisions_b = list(deployment_b.divisions) if deployment_b else []
+
+    dominant_a = _dominant_type(divisions_a)
+    dominant_b = _dominant_type(divisions_b)
+
+    total_strength_a = sum(_combat_strength(d, node_a.terrain, True, dominant_b) for d in divisions_a)
+    total_strength_b = sum(_combat_strength(d, node_b.terrain, True, dominant_a) for d in divisions_b)
+    total_strength = total_strength_a + total_strength_b
+
+    names_a = ", ".join(d.name for d in divisions_a)
+    names_b = ", ".join(d.name for d in divisions_b)
+    print(
+        f"Clash between '{node_a.id}' and '{node_b.id}': {len(divisions_a)} {country_a} division(s) "
+        f"[{names_a}] vs {len(divisions_b)} {country_b} division(s) [{names_b}]."
+    )
+    print(
+        f"  Terrain: {country_a} attacking from {node_a.terrain.name}, {country_b} attacking from "
+        f"{node_b.terrain.name}. Dominant type - {country_a}: {dominant_a.name if dominant_a else 'none'}, "
+        f"{country_b}: {dominant_b.name if dominant_b else 'none'}."
+    )
+    if total_strength <= 0:
+        print("  Neither side can fight - the clash fizzles.")
+        return
+
+    loss_fraction_a = total_strength_b / total_strength
+    loss_fraction_b = total_strength_a / total_strength
+
+    for division in divisions_a:
+        division.manpower = max(0, round(division.manpower * (1 - loss_fraction_a)))
+    for division in divisions_b:
+        division.manpower = max(0, round(division.manpower * (1 - loss_fraction_b)))
+
+    def _cull(divisions: list[Division], deployment: MilitaryDeployment | None, node: Node) -> tuple[list[Division], list[Division]]:
+        destroyed = [d for d in divisions if d.manpower <= 0]
+        survivors = [d for d in divisions if d.manpower > 0]
+        if destroyed and deployment is not None:
+            for division in destroyed:
+                deployment.divisions.remove(division)
+            if not deployment.divisions:
+                node.military_deployments.remove(deployment)
+        return destroyed, survivors
+
+    destroyed_a, survivors_a = _cull(divisions_a, deployment_a, node_a)
+    destroyed_b, survivors_b = _cull(divisions_b, deployment_b, node_b)
+
+    if destroyed_a:
+        print(f"  {country_a} losses: {', '.join(d.name for d in destroyed_a)} destroyed.")
+    if destroyed_b:
+        print(f"  {country_b} losses: {', '.join(d.name for d in destroyed_b)} destroyed.")
+
+    if not survivors_a and not survivors_b:
+        print("  Both forces are wiped out - mutual annihilation, no ground gained either way.")
+        return
+    if not survivors_a:
+        for division in survivors_b:
+            deployment_b.divisions.remove(division)
+        if deployment_b is not None and not deployment_b.divisions and deployment_b in node_b.military_deployments:
+            node_b.military_deployments.remove(deployment_b)
+        _occupy_node(world, node_a, country_b, country_a, survivors_b)
+        print(f"  {country_a}'s force is wiped out - {country_b} overruns '{node_a.id}'.")
+        return
+    if not survivors_b:
+        for division in survivors_a:
+            deployment_a.divisions.remove(division)
+        if deployment_a is not None and not deployment_a.divisions and deployment_a in node_a.military_deployments:
+            node_a.military_deployments.remove(deployment_a)
+        _occupy_node(world, node_b, country_a, country_b, survivors_a)
+        print(f"  {country_b}'s force is wiped out - {country_a} overruns '{node_b.id}'.")
+        return
+    print("  Both sides still have forces standing - neither position falls, but both are bloodied.")
 
 
 def cmd_move_division(world: World, args: list[str]) -> None:
@@ -1843,6 +1937,47 @@ def cmd_group_attack(world: World, args: list[str]) -> None:
         return
 
     resolve_combat(world, attackers, country_name, origin, destination)
+
+
+def cmd_clash(world: World, args: list[str]) -> None:
+    if len(args) != 4:
+        print("Usage: clash <country_a> <node_a> <country_b> <node_b>")
+        return
+    country_a, node_a_id, country_b, node_b_id = args
+    if world.get_country(country_a) is None:
+        print(f"No such country '{country_a}'.")
+        return
+    if world.get_country(country_b) is None:
+        print(f"No such country '{country_b}'.")
+        return
+    if country_a == country_b:
+        print("A country can't clash with itself.")
+        return
+    node_a = world.get_node(node_a_id)
+    if node_a is None:
+        print(f"No such node '{node_a_id}'.")
+        return
+    node_b = world.get_node(node_b_id)
+    if node_b is None:
+        print(f"No such node '{node_b_id}'.")
+        return
+    if node_a_id == node_b_id:
+        print(f"'{node_a_id}' and '{node_b_id}' are the same node.")
+        return
+    if not world.is_at_war(country_a, country_b):
+        print(f"'{country_a}' and '{country_b}' aren't at war - use 'declare-war' first.")
+        return
+
+    deployment_a = next((d for d in node_a.military_deployments if d.country == country_a), None)
+    if deployment_a is None or not deployment_a.divisions:
+        print(f"'{country_a}' has no divisions at '{node_a_id}'.")
+        return
+    deployment_b = next((d for d in node_b.military_deployments if d.country == country_b), None)
+    if deployment_b is None or not deployment_b.divisions:
+        print(f"'{country_b}' has no divisions at '{node_b_id}'.")
+        return
+
+    resolve_clash(world, country_a, node_a, country_b, node_b)
 
 
 def refresh_country_stats(world: World) -> None:
@@ -2137,6 +2272,8 @@ def run_command(world: World, raw: str) -> bool:
         cmd_move_division(world, args)
     elif command == "group-attack":
         cmd_group_attack(world, args)
+    elif command == "clash":
+        cmd_clash(world, args)
     elif command == "set-equipment":
         cmd_set_equipment(world, args)
     elif command == "recover":
