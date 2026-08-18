@@ -31,10 +31,19 @@ BADGE_BG = (38, 38, 42)  # #26262a - main.py's .year-badge background
 TITLE_FONT_SIZE = 20
 BADGE_FONT_SIZE = 14
 LEGEND_FONT_SIZE = 13
+AXIS_FONT_SIZE = 11
+AXIS_COLOR = (140, 140, 145)
 
 HEADER_HEIGHT = 40
 BADGE_PADDING_X = 16
 BADGE_PADDING_Y = 10
+
+AXIS_LABEL_PADDING = 6  # gap between an axis label and the grid edge it's next to
+# "Nice" intervals to space coordinate labels at - the smallest one that still keeps labels at
+# least AXIS_MIN_LABEL_SPACING_PX apart along that axis wins, so a huge world doesn't try to
+# print every single column/row number on top of itself.
+AXIS_LABEL_STEPS = [1, 2, 5, 10, 20, 25, 50, 100, 200, 250, 500, 1000]
+AXIS_MIN_LABEL_SPACING_PX = 34
 
 LEGEND_TOP_MARGIN = 20
 LEGEND_ROW_HEIGHT = 22
@@ -69,6 +78,27 @@ def _country_bounds(world: World, country_name: str) -> tuple[int, int, int, int
         min(world.width - 1, max(xs) + CROP_PADDING_TILES),
         min(world.height - 1, max(ys) + CROP_PADDING_TILES),
     )
+
+
+def _axis_label_step(span: int, tile_stride: float) -> int:
+    """The smallest "nice" interval (see AXIS_LABEL_STEPS) that keeps consecutive coordinate
+    labels at least AXIS_MIN_LABEL_SPACING_PX apart at this tile size - so a small crop labels
+    every tile, while a full 300+-tile world falls back to every 10th/50th/100th one instead of
+    printing an unreadable wall of overlapping numbers."""
+    for step in AXIS_LABEL_STEPS:
+        if step * tile_stride >= AXIS_MIN_LABEL_SPACING_PX or step >= span:
+            return step
+    return AXIS_LABEL_STEPS[-1]
+
+
+def _axis_label_positions(min_v: int, max_v: int, step: int) -> list[int]:
+    """Coordinate values to label: min_v, then every step from there, always ending on max_v
+    (added separately if the regular stride doesn't already land on it) so the map's actual
+    bounds are always readable even when they fall mid-interval."""
+    positions = list(range(min_v, max_v + 1, step))
+    if positions[-1] != max_v:
+        positions.append(max_v)
+    return positions
 
 
 def _wrap_legend(names: list[str], font: ImageFont.FreeTypeFont, max_width: float) -> list[list[str]]:
@@ -118,9 +148,27 @@ def render_map(world: World, title: Optional[str] = None, country: Optional[str]
     title_font = ImageFont.load_default(size=TITLE_FONT_SIZE)
     badge_font = ImageFont.load_default(size=BADGE_FONT_SIZE)
     legend_font = ImageFont.load_default(size=LEGEND_FONT_SIZE)
+    axis_font = ImageFont.load_default(size=AXIS_FONT_SIZE)
 
     map_width = region_width * tile_size + (region_width - 1) * TILE_GAP
     map_height = region_height * tile_size + (region_height - 1) * TILE_GAP
+
+    # Coordinate axis labels: x along the top, y along the left, spaced out at whatever "nice"
+    # interval keeps them legible at this tile size (see _axis_label_step) - a small crop labels
+    # every tile, a full huge world falls back to every 10th/50th/100th one instead.
+    tile_stride = tile_size + TILE_GAP
+    x_labels = _axis_label_positions(min_x, max_x, _axis_label_step(region_width, tile_stride))
+    y_labels = _axis_label_positions(min_y, max_y, _axis_label_step(region_height, tile_stride))
+
+    # Measured with a scratch context, before the real canvas exists, since a cropped region
+    # (e.g. one small country's territory) can be narrower than title + badge need side by side -
+    # in which case the canvas widens to fit the header instead of letting them overlap.
+    scratch = ImageDraw.Draw(Image.new("RGB", (1, 1)))
+    y_axis_width = round(max(scratch.textlength(str(v), font=axis_font) for v in y_labels) + AXIS_LABEL_PADDING * 2)
+    x_axis_height = AXIS_FONT_SIZE + AXIS_LABEL_PADDING * 2
+
+    content_width = y_axis_width + map_width
+    content_height = x_axis_height + map_height
 
     visible_names = {
         node.country
@@ -131,18 +179,14 @@ def render_map(world: World, title: Optional[str] = None, country: Optional[str]
     legend_rows = _wrap_legend(legend_names, legend_font, map_width)
     legend_height = LEGEND_TOP_MARGIN + len(legend_rows) * LEGEND_ROW_HEIGHT if legend_rows else 0
 
-    # Measured with a scratch context, before the real canvas exists, since a cropped region
-    # (e.g. one small country's territory) can be narrower than title + badge need side by side -
-    # in which case the canvas widens to fit the header instead of letting them overlap.
-    scratch = ImageDraw.Draw(Image.new("RGB", (1, 1)))
     year_text = f"Year {world.year}"
     badge_width = scratch.textlength(year_text, font=badge_font) + BADGE_PADDING_X * 2
     badge_height = BADGE_FONT_SIZE + BADGE_PADDING_Y
     title_width = scratch.textlength(title, font=title_font) if title else 0
     header_width = title_width + (30 if title else 0) + badge_width
 
-    canvas_width = round(max(map_width, header_width) + PAGE_PADDING * 2)
-    canvas_height = PAGE_PADDING + HEADER_HEIGHT + map_height + legend_height + PAGE_PADDING
+    canvas_width = round(max(content_width, header_width) + PAGE_PADDING * 2)
+    canvas_height = PAGE_PADDING + HEADER_HEIGHT + content_height + legend_height + PAGE_PADDING
 
     image = Image.new("RGB", (canvas_width, canvas_height), BACKGROUND)
     draw = ImageDraw.Draw(image)
@@ -162,10 +206,38 @@ def render_map(world: World, title: Optional[str] = None, country: Optional[str]
     )
 
     # Centered rather than pinned to PAGE_PADDING, since the canvas may have been widened past
-    # map_width just to fit the header (title + badge) - a small cropped region shouldn't end up
-    # shoved into the top-left corner with a wall of empty space beside it.
-    map_left = (canvas_width - map_width) / 2
-    map_top = PAGE_PADDING + HEADER_HEIGHT
+    # content_width just to fit the header (title + badge) - a small cropped region shouldn't end
+    # up shoved into the top-left corner with a wall of empty space beside it. content_left is the
+    # axis labels' left edge; the tile grid itself starts y_axis_width further right.
+    content_left = (canvas_width - content_width) / 2
+    grid_left = content_left + y_axis_width
+    grid_top = PAGE_PADDING + HEADER_HEIGHT + x_axis_height
+
+    def tile_center(x: int, y: int) -> tuple[float, float]:
+        return (
+            grid_left + (x - min_x) * tile_stride + tile_size / 2,
+            grid_top + (y - min_y) * tile_stride + tile_size / 2,
+        )
+
+    for label_x in x_labels:
+        cx, _ = tile_center(label_x, min_y)
+        text = str(label_x)
+        draw.text(
+            (cx - scratch.textlength(text, font=axis_font) / 2, grid_top - x_axis_height + AXIS_LABEL_PADDING / 2),
+            text,
+            font=axis_font,
+            fill=AXIS_COLOR,
+        )
+    for label_y in y_labels:
+        _, cy = tile_center(min_x, label_y)
+        text = str(label_y)
+        draw.text(
+            (grid_left - y_axis_width + AXIS_LABEL_PADDING, cy - AXIS_FONT_SIZE / 2),
+            text,
+            font=axis_font,
+            fill=AXIS_COLOR,
+        )
+
     for y in range(min_y, max_y + 1):
         for x in range(min_x, max_x + 1):
             node = grid.get((x, y))
@@ -175,13 +247,13 @@ def render_map(world: World, title: Optional[str] = None, country: Optional[str]
                 color = country_colors.get(node.country, unclaimed_color)
             else:
                 color = unclaimed_color
-            left = map_left + (x - min_x) * (tile_size + TILE_GAP)
-            top = map_top + (y - min_y) * (tile_size + TILE_GAP)
+            left = grid_left + (x - min_x) * tile_stride
+            top = grid_top + (y - min_y) * tile_stride
             draw.rectangle([left, top, left + tile_size - 1, top + tile_size - 1], fill=color)
 
-    legend_y = map_top + map_height + LEGEND_TOP_MARGIN
+    legend_y = grid_top + map_height + LEGEND_TOP_MARGIN
     for row in legend_rows:
-        x = map_left
+        x = grid_left
         for name in row:
             draw.rounded_rectangle(
                 [x, legend_y + 4, x + LEGEND_SWATCH_SIZE, legend_y + 4 + LEGEND_SWATCH_SIZE],

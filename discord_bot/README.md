@@ -106,9 +106,10 @@ role - otherwise a granted role could grant itself more access than it was actua
   `/governments` - the fixed vocabulary each of those fields accepts, same as the CLI's own
   reference-list commands
 - `/map [country]` - the world grid as a PNG, styled to match the CLI/web terminal's map (dark
-  background, gridlines between tiles, a "Year N" badge, a wrapped legend) - one tile per node
-  colored by owning country, same palette as `assign_country_colors()`. Pass `country` to zoom
-  to just that country's own territory plus a couple tiles of surrounding context, instead of
+  background, gridlines between tiles, a "Year N" badge, a wrapped legend, coordinate numbers
+  along the top and left edges) - one tile per node colored by owning country, same palette as
+  `assign_country_colors()`. Pass `country` to zoom to just that country's own territory plus a
+  couple tiles of surrounding context, instead of
   the whole grid.
 - `/botstatus` - the bot process itself: uptime, gateway latency, server count, and the git
   commit it was deployed from (handy for confirming a `git pull` + restart actually took)
@@ -158,7 +159,10 @@ which can otherwise take up to an hour to reach clients.
   own nodes' bounding box, padded and clamped to the grid - and the legend only lists countries
   actually visible in whatever region ends up rendered, not every country in the world. The
   canvas widens past the map's own width when needed so a long title/small crop can't overlap
-  the year badge.
+  the year badge. `_axis_label_step()` picks the coordinate-label interval along each edge - the
+  smallest "nice" step (1, 2, 5, 10, 20, ...) that still keeps labels at least ~34px apart at the
+  current tile size, so a small country crop labels every tile while a huge world falls back to
+  every 5th/10th/50th one instead of printing an unreadable wall of overlapping numbers.
 - `on_ready`/`on_guild_join` copy the global command tree into a guild-specific override and sync
   *that* (`tree.copy_global_to(guild=...)` + `tree.sync(guild=...)`) instead of a plain global
   `tree.sync()`, so command updates show up in seconds rather than waiting on Discord's global
