@@ -4,15 +4,16 @@ Technical documentation for how nodetech is put together. For the command refere
 
 ## Overview
 
-nodetech is a single-process, in-memory text game. Everything lives in one `World` object for the lifetime of a terminal session; there is no live database connection — state is only persisted when you explicitly `save`, and only loaded when you explicitly `open` or `new-world`.
+nodetech is a single-process, in-memory text game. Everything lives in one `World` object for the lifetime of a terminal session; there is no live database connection — state is only persisted when you explicitly `save`, and only loaded when you explicitly `open` or `new-world`. (The Discord bot is the one frontend that departs from "one `World`" — see "Discord bot" below.)
 
 ```
-main.py        terminal loop, command parsing/dispatch, World container, HTML map generation
-node.py        Node, MilitaryDeployment, Terrain, BuildingType, ResourceType, ExtractionSiteType
-country.py     Country, GovernmentType
-division.py    Division, AirForceDivision, DivisionType, ID generation
-database.py    JSON (de)serialization, save-file location/naming
-web/index.html browser terminal (Pyodide) - runs the same Python modules client-side
+main.py         terminal loop, command parsing/dispatch, World container, HTML map generation, combat/war, supply
+node.py         Node, MilitaryDeployment, Terrain, BuildingType, ResourceType, ExtractionSiteType
+country.py      Country, GovernmentType
+division.py     Division, AirForceDivision, DivisionType, ID generation
+database.py     JSON (de)serialization, save-file location/naming
+web/index.html  browser terminal (Pyodide) - runs the same Python modules client-side
+discord_bot/    Discord bot frontend - imports the same modules, one World per guild (own README.md)
 ```
 
 Dependency direction is strictly one-way: `division.py` has no imports from this project; `node.py` imports `division.py`; `country.py` imports `division.py` and `node.py`; `database.py` imports all three model modules; `main.py` imports `database.py` and all three model modules. Nothing imports `main.py`, so there is no circular-import risk anywhere in the graph.
@@ -30,9 +31,12 @@ The smallest unit of military strength.
 | `id` | `str` | Internal identifier, auto-generated — see "Division IDs and names" below |
 | `name` | `str` | Player-given, and the **primary way divisions are referenced** in commands (must be unique within its own country — see below) |
 | `division_type` | `DivisionType` | INFANTRY / ARMOR / ARTILLERY / CAVALRY / AIRBORNE / ENGINEER / LOGISTICS / AIR_FORCE |
-| `manpower` | `int` | Number of men in the division |
-| `supply_requirement` | `float` | How much supply the division consumes (not yet consumed by any game logic — stored for future use) |
-| `morale` | `float` | Defaults to `100.0` |
+| `manpower` | `int` | Number of men currently in the division — reduced by combat losses (see "Combat and war" below) |
+| `max_manpower` | `int` | The manpower it was raised at; pinned to the starting `manpower` in `__post_init__` if not given explicitly (e.g. when loading a save with an already-damaged division). What `recover` restores `manpower` to |
+| `supply_requirement` | `float` | How much supply the division consumes each year — checked against `Node.get_local_supply()` (pooled across its rail network) by `apply_supply_shortfalls()`; a shortfall dings morale and equipment, full coverage recovers equipment. See "Supply system" below |
+| `morale` | `float` | Defaults to `100.0`; reduced by combat losses and supply shortfalls |
+| `equipment_rating` | `float` | Current gear condition (defaults to `50.0` for every division type, air force included) — feeds directly into combat strength |
+| `equipment_cap` | `float` | The ceiling `equipment_rating` can recover toward under good supply (defaults to `50.0`); raised with `set-equipment`, which also clamps the current rating down if the new cap is lower |
 | `location` | `str \| None` | The `Node.id` the division is currently stationed at, or `None` if it's in a country's reserve |
 
 Divisions are constructed exclusively through `Division.create(...)`, never the raw dataclass constructor directly — this is what guarantees a properly generated `id`.
@@ -62,10 +66,11 @@ Each country's counter is independent, so `"Fedran Republic"` and `"Astoria"` bo
 @dataclass
 class AirForceDivision(Division):
     aircraft_type: str = ""
-    equipment_rating: float = 0.0
     aircraft_count: int = 0
     range: float = 0.0
 ```
+
+`equipment_rating`/`equipment_cap` live on the base `Division` now (every division type has them), so `AirForceDivision` only adds what's genuinely air-force-specific. The one wrinkle: `create_air_force()` treats an explicitly-passed `equipment_rating` as a manual set, starting the division right at its own cap (`equipment_rating=equipment_rating, equipment_cap=equipment_rating`) — air force divisions are the one type that requires this at creation, rather than starting at the flat `50.0`/`50.0` default every other division type gets.
 
 This is genuine inheritance (`isinstance(division, Division)` is `True` for an `AirForceDivision`), not a `Division` with an `AIR_FORCE` enum tag and unused extra fields. That's deliberate: it means every piece of code that already works with `Division` generically — `MilitaryDeployment.divisions`, `Country.reserve_divisions`, `deploy-reserve`'s name lookup, `country-divisions`, `world divisions`, JSON save/load — handles an `AirForceDivision` with zero special-casing. The only places that *do* know about the subtype are:
 
@@ -96,6 +101,7 @@ A single map tile — the core unit the whole game is built on.
 | `country` | `str \| None` | Name of the controlling `Country`, or `None` if unclaimed |
 | `terrain` | `Terrain` | PLAINS / FOREST / HILLS / MOUNTAIN / DESERT / WATER / URBAN |
 | `connected_tiles` | `list[str]` | IDs of adjacent/linked nodes (bidirectional; `connect`/`disconnect` both maintain both sides) |
+| `rail_connected_tiles` | `list[str]` | IDs of nodes this one has a railroad to (bidirectional, same pattern as `connected_tiles`) — always a subset of `connected_tiles`, since `build-railroad` refuses a pair that isn't already `connect`ed, and `disconnect` tears down any railroad running along that link too. Defines the clusters `apply_supply_shortfalls()` pools local supply across — see "Supply system" below |
 | `building_options` | `list[bool]` | One flag per `BuildingType`, indexed by `BuildingType.value - 1` (see below) |
 | `resources` | `list[bool]` | One flag per `ResourceType` (`BASIC_MATERIALS` / `RARE_EARTH_METALS` / `OIL_GAS`), same positional-array pattern as `building_options` |
 | `extraction_sites` | `list[bool]` | One flag per `ExtractionSiteType`, same positional-array pattern — see "Resources and extraction sites" below |
@@ -192,6 +198,7 @@ class World:
     save_path: str | None         # last path used by `open` or `save`, for bare `save`
     width: int                    # grid dimensions, set by `new-world`; defaults to DEFAULT_GRID_SIZE (10) for a bare World()
     height: int
+    wars: set[frozenset[str]]     # each war is an unordered pair of country names - see "Combat and war" below
 ```
 
 There is exactly one `World` instance per process, created in `main()` and threaded through every command handler. Nothing about the design prevents holding multiple `World` instances (e.g. for a future multi-game-at-once mode), but the terminal loop only ever drives one at a time — `new-world`/`open` both **replace the contents of the current `World` in place** (`.clear()` + repopulate) rather than constructing a new one, which is why `world.save_path` and any other bookkeeping on the `World` object survive across those operations except where explicitly overwritten.
@@ -206,9 +213,13 @@ Old save files predate `width`/`height`/`x`/`y` entirely; see "Save file format"
 
 #### `map` — HTML grid rendering
 
-`cmd_map()` calls `build_map_html(world)`, writes the result to `~/proppunk game files/map.html`, and opens it via `webbrowser.open()`. The whole page is generated by plain Python string templating — `MAP_CSS_TEMPLATE`/`MAP_JS` are deliberately *not* f-strings, so their CSS/JS `{`/`}` braces never collide with Python's own f-string interpolation; dynamic bits (the empty-tile color) go in via `__TOKEN__` substitution instead. No external HTML/CSS/JS dependency.
+`cmd_map()` calls `build_map_html(world)`, writes the result to `~/proppunk game files/map.html`, and opens it via `webbrowser.open()`. The whole page is generated by plain Python string templating — `MAP_CSS_TEMPLATE`/`MAP_JS` are deliberately *not* f-strings, so their CSS/JS `{`/`}` braces never collide with Python's own f-string interpolation; dynamic bits (the empty-tile color, the tile-gap size) go in via `__TOKEN__` substitution instead. No external HTML/CSS/JS dependency.
 
-One `<div class="tile">` is emitted per grid slot (`y` from `0` to `height - 1`, `x` left to right within each row), sized by a `tile_size` chosen from the world's dimensions and colored by `assign_country_colors()` (a fixed 12-color palette cycled by insertion order — the 13th country reuses the 1st color) or a neutral gray for unclaimed/empty slots. Each tile carries `data-*` attributes (id, position, country, terrain, population, economic output). An inline `<script>` (`MAP_JS`) attaches a single `mouseover`/`mouseleave` listener to the grid container — event delegation, not one listener per tile — that swaps a side panel between its default content (every country's live GDP/population, from `Country.calculate_economic_output`/`calculate_population`) and the hovered tile's stats.
+One `<div class="tile">` is emitted per grid slot (`y` from `0` to `height - 1`, `x` left to right within each row), sized by a `tile_size` chosen from the world's dimensions and colored by `assign_country_colors()` or a neutral gray for unclaimed/empty slots. Each tile carries `data-*` attributes (id, position, country, terrain, population, economic output). An inline `<script>` (`MAP_JS`) attaches a single `mouseover`/`mouseleave` listener to the grid container — event delegation, not one listener per tile — that swaps a side panel between its default content (every country's live GDP/population, from `Country.calculate_economic_output`/`calculate_population`) and the hovered tile's stats.
+
+**`assign_country_colors()` is a greedy graph coloring**, not a naive palette cycle: countries are nodes, an edge connects any two whose territory is 4-directionally adjacent somewhere on the grid, and each country gets a color from the 30-entry `MAP_TILE_COLORS` palette — specifically the **least-used-so-far** color among the ones none of its already-colored neighbors are using (processing the most-bordered countries first, Welsh-Powell-style, so a limited palette goes further). Picking the least-used rather than just the first available one is what actually spreads usage across the whole palette instead of every country piling onto the same early entries regardless of palette size. If a country somehow borders every palette color already, it falls back to cycling by position. Two countries that don't border each other can still end up with the same color — the guarantee is only that *adjacent* ones never match.
+
+`build_map_html()` also embeds every rail-connected pair as inert JSON (`<script id="rail-edges" type="application/json">`) — grid-coordinate quadruples (`[x1, y1, x2, y2]`) plus the tile size/gap/overall pixel dimensions, not node IDs, so a client-side consumer can place each line with pure arithmetic instead of a DOM lookup. Harmless on the standalone page the CLI writes; this is what the web terminal's railroad-overlay toggle reads — see "Web terminal" below.
 
 The page's own styling lives under a `.map-page` class rather than a bare `body` selector, and `.year-badge` is `position: absolute` (relative to `.map-page`) rather than `position: fixed`. Neither choice matters for the standalone file the CLI writes, but both are required for the map to render correctly when its markup is spliced into another page instead of being its own document — see "Web terminal" below, which does exactly that.
 
@@ -222,7 +233,63 @@ node.country = country_name          # Node -> Country (by name)
 country.nodes.append(node_id)        # Country -> Node (by id)
 ```
 
-There is no automatic consistency check elsewhere — if code ever mutates `node.country` or `country.nodes` directly instead of going through `cmd_setcountry`, the two sides can drift out of sync.
+There is no automatic consistency check elsewhere — if code ever mutates `node.country` or `country.nodes` directly instead of going through `cmd_setcountry`/`cmd_unsetcountry`, the two sides can drift out of sync. `unsetcountry <id>` is the same pattern in reverse — detach from the current owner's `nodes` list and set `node.country = None` — for putting a node back to unclaimed, which `setcountry` alone can't do (it requires an existing `Country` to point at).
+
+## Combat and war ([main.py](main.py))
+
+Two countries have to be **at war** before either can fight on the other's territory — `World.wars: set[frozenset[str]]` holds each war as an unordered pair of country names (a `frozenset` so `{A, B}` and `{B, A}` are the same entry), managed by `declare_war`/`make_peace`/`is_at_war`:
+
+```python
+def is_at_war(self, country_a: str, country_b: str) -> bool:
+    return frozenset((country_a, country_b)) in self.wars
+```
+
+There are two ways to actually fight:
+
+- **`move-division <country> <name> <destination_id>`** normally just relocates a deployed division. If the destination is enemy territory, it attacks instead — with just that one division — provided the two countries are at war (refused otherwise, pointing at `declare-war`).
+- **`group-attack <country> <origin_id> <destination_id>`** attacks with *every* division `country` has deployed at `origin_id`, as a single combined force. Refused if the destination isn't enemy territory at all (points at `move-division` instead) or if the two countries aren't at war.
+
+Both funnel into `resolve_combat(world, attackers, attacker_country, origin, destination)`, which resolves immediately (no multi-turn siege state):
+
+```python
+def _combat_strength(division: Division, terrain_modifier: float) -> float:
+    return (
+        division.manpower
+        * (division.morale / 100.0)
+        * (division.equipment_rating / 100.0)
+        * terrain_modifier
+        * random.uniform(*COMBAT_RANDOMNESS_RANGE)   # (0.85, 1.15), rolled independently per division
+    )
+```
+
+Every attacking division's strength (using `origin.terrain`'s *attack* modifier) is summed against every defending division's strength (using `destination.terrain`'s *defense* modifier — the defending country's `MilitaryDeployment` at that node, if any). `TERRAIN_ATTACK_MODIFIERS`/`TERRAIN_DEFENSE_MODIFIERS` are separate tables keyed by the same `Terrain` enum: rough terrain (`MOUNTAIN`, `HILLS`, `FOREST`) is harder to attack *from* (`0.75`–`0.9`×) but better to defend (`1.15`–`1.35`×); `PLAINS`/`DESERT`/`WATER` are attack-neutral (`1.0`×/`0.95`×) and defense-neutral-to-weak (`1.0`×).
+
+Casualties are proportional, not all-or-nothing: `attacker_loss_fraction = total_defender_strength / total_strength` (and the mirror image for defenders), applied evenly across every division on that side (`manpower = round(manpower * (1 - loss_fraction))`, floored at `0`). A division that hits `0` manpower is destroyed outright — removed from its `MilitaryDeployment` (and the deployment itself, if it was the last division there). The node only changes hands if **every** defending division is destroyed **and** at least one attacker survives; surviving attackers are then moved onto `destination` (same `MilitaryDeployment`-creation logic as a normal move) and ownership transfers (`destination.country` + both countries' `nodes` lists updated, same pattern as `cmd_setcountry`). Otherwise, survivors on both sides just keep their reduced manpower where they already were — attackers don't retreat to a different node, they simply didn't take this one.
+
+There's no occupation/siege mechanic beyond this single exchange — a node with defenders that survive stays contested exactly as it was, and the same attacker can `group-attack`/`move-division` into it again on a later turn for another exchange.
+
+## Supply system ([main.py](main.py), [node.py](node.py))
+
+Every node generates its own **local supply**, independent of who owns it or what's stationed on it:
+
+```python
+def get_local_supply(self) -> float:
+    bonus = BARRACKS_SUPPLY_BONUS if self.has_building(BuildingType.BARRACKS) else 0.0
+    return NODE_BASE_SUPPLY + self.population * POPULATION_SUPPLY_PER_CAPITA + self.economic_output * GDP_SUPPLY_PER_OUTPUT + bonus
+```
+
+(`NODE_BASE_SUPPLY = 5.0`, `POPULATION_SUPPLY_PER_CAPITA = 0.005`, `GDP_SUPPLY_PER_OUTPUT = 0.01`, `BARRACKS_SUPPLY_BONUS = 5.0` — population and economic output dominate at any realistic scale, so a node's supply output tracks how developed it is, not just whether a barracks is built.)
+
+`apply_supply_shortfalls(world)` — run automatically once a year as part of `advance_year()`, or on demand via the standalone `apply-supply` command — is what actually checks a division's `supply_requirement` against this. For each country, it walks every node the country owns that hasn't been visited yet, builds a **rail cluster** (`_rail_cluster()`: every node reachable from it by following only `rail_connected_tiles`, staying within nodes owned by that same country — a node with no railroad at all is its own cluster of one), and treats the whole cluster as one shared supply pool:
+
+1. Each node in the cluster first covers its own deployed divisions' `supply_requirement` from its own `get_local_supply()`.
+2. Whatever's left over (a node with no divisions gives up all of it; a node whose own divisions used less than it produced gives up the remainder) is pooled into `excess_pool`. Nodes that couldn't cover their own demand register a `shortfall` instead.
+3. `coverage_ratio = min(1.0, excess_pool / total_shortfall)` — the fraction of the cluster's *total* shortfall the pooled excess can make up.
+4. Every node's own remaining shortfall is reduced by that ratio; whatever's still unmet is split proportionally across that node's own divisions.
+
+A division whose demand ends up **fully met** (whether from its own node or the pool) has `equipment_rating` climb toward `equipment_cap` by `EQUIPMENT_RECOVERY_PER_YEAR` (`5.0`). A division with **unmet** demand takes damage proportional to how much went unmet (`unmet / local_demand`): up to `SUPPLY_SHORTFALL_MORALE_PENALTY` (`15.0`) off `morale` and `SUPPLY_SHORTFALL_EQUIPMENT_PENALTY` (`10.0`) off `equipment_rating`, both floored at `0`. `apply_supply_shortfalls()` returns `(divisions_supplied, divisions_short)` so `apply-supply` has something concrete to report — `advance-year` runs the same function but doesn't surface those counts itself.
+
+Since the pool only extends along `rail_connected_tiles` within the *same country*, a division stationed somewhere with no railroad at all is limited to whatever that one node produces on its own — railroads exist specifically to let a rich interior node backstop a poor or heavily-garrisoned frontier one.
 
 ## Command dispatch ([main.py](main.py))
 
@@ -265,6 +332,7 @@ A save file is one JSON object:
     "<node_id>": {
       "id": "...", "x": 3, "y": 4, "country": "...", "terrain": "HILLS",
       "connected_tiles": ["..."],
+      "rail_connected_tiles": ["..."],           // always a subset of connected_tiles
       "building_options": [true, false, ...],   // positional, see building_options above
       "resources": [true, false, false],        // positional, one per ResourceType
       "extraction_sites": [false, false, true],  // positional, one per ExtractionSiteType
@@ -276,10 +344,12 @@ A save file is one JSON object:
           "country": "...",
           "divisions": [
             {"id": "Fedran Republic_div_1", "name": "1st Infantry", "division_type": "INFANTRY",
-             "manpower": 5000, "supply_requirement": 12.5, "morale": 100.0, "location": "<node_id>"},
+             "manpower": 5000, "max_manpower": 5000, "supply_requirement": 12.5, "morale": 100.0,
+             "equipment_rating": 50.0, "equipment_cap": 50.0, "location": "<node_id>"},
             {"id": "Fedran Republic_div_2", "name": "1st Air Wing", "division_type": "AIR_FORCE",
-             "manpower": 400, "supply_requirement": 18.0, "morale": 100.0, "location": "<node_id>",
-             "aircraft_type": "F-16", "equipment_rating": 8.5, "aircraft_count": 24, "range": 1200.0}
+             "manpower": 400, "max_manpower": 400, "supply_requirement": 18.0, "morale": 100.0,
+             "equipment_rating": 8.5, "equipment_cap": 8.5, "location": "<node_id>",
+             "aircraft_type": "F-16", "aircraft_count": 24, "range": 1200.0}
           ]
         }
       ]
@@ -291,11 +361,12 @@ A save file is one JSON object:
       "treasury": 0.0, "stability": 50.0, "economic_output": 550.0, "population": 10500,
       "reserve_divisions": [ /* same division shape as above, "location": null */ ]
     }
-  }
+  },
+  "wars": [["Fedran Republic", "Astoria"]]   // list of [country_a, country_b] pairs, each currently at war
 }
 ```
 
-Enums are stored by member **name** (`"HILLS"`, not `1`), so the encoding is stable across reordering `auto()` values in the enum definitions — but renaming an enum member breaks old save files (there's no migration layer). A division's extra `aircraft_*`/`range` keys are only present when `division_type` is `"AIR_FORCE"`; `_division_from_dict` branches on that field to decide whether to construct a plain `Division` or an `AirForceDivision`.
+Enums are stored by member **name** (`"HILLS"`, not `1`), so the encoding is stable across reordering `auto()` values in the enum definitions — but renaming an enum member breaks old save files (there's no migration layer). A division's extra `aircraft_type`/`aircraft_count`/`range` keys are only present when `division_type` is `"AIR_FORCE"`; `_division_from_dict` branches on that field to decide whether to construct a plain `Division` or an `AirForceDivision`. `equipment_rating`/`equipment_cap`/`max_manpower`, in contrast, are present on **every** division regardless of type — they moved from `AirForceDivision`-only to the base `Division` class, so a save file predating that change loads via `.get()` defaults (`50.0`/`50.0` for the equipment fields, the division's own `manpower` for `max_manpower`) rather than failing.
 
 `database.py` has no knowledge of `World` — its functions are written against duck-typed objects with `.nodes`, `.countries`, `.year` attributes (matching dicts of the right shapes), specifically so it doesn't need to import `main.py` and create a cycle:
 
@@ -324,9 +395,24 @@ A single self-contained HTML page that runs the actual game — not a reimplemen
 - **Command execution**: each line typed into the terminal is passed straight to `game.run_command(world, line)`. `world` is a single Python object held for the page's lifetime — `run_command` and every `cmd_*` handler mutate it in place (same as the CLI's own REPL loop), so the JS-held reference stays valid and in sync across every call; nothing reconstructs or reassigns it. `pyodide.setStdout`/`setStderr` redirect everything `print()` writes into the page's output pane, so none of the command handlers needed to change to work here.
 - **Save/load**: "Load save" writes an uploaded file's contents into Pyodide's filesystem at the exact path `database.resolve_save_path()` would produce for that name, then runs `open <name>` — the same code path as the CLI's own `open` command, not a separate loader. "Download current save" runs `save`, then reads the resulting file back out of the virtual filesystem and triggers a real browser download via a `Blob`.
 - **`map` embedding**: Pyodide's sandbox has nothing for `webbrowser.open()` to actually shell out to, so it's monkeypatched (right after `import main as game`) to call a JS function instead of trying to launch a browser. That function reads the HTML `cmd_map()` already wrote to the virtual filesystem, parses it with `DOMParser`, and splices its body content into the page's own `#map-pane` — injecting its `<style>` once into a shared `<style>` tag and re-attaching its `<script>` (tags inserted via `innerHTML` don't execute on their own) — instead of opening a new tab. This only works because `build_map_html`'s markup is styled via the embeddable `.map-page` class rather than a bare `body` selector (see "`map` — HTML grid rendering" above).
-- **Not ported**: `readline`-based tab-completion has no browser equivalent; the command input is a plain `<input>` with just up/down-arrow history.
+- **Pan/zoom**: `#map-scale-wrapper` (holding the map's actual markup, at native size) sits inside a fixed-size `#map-scale-sizer` viewport and is transformed with `translate(...) scale(...)` in JS (`mapView` state + `applyMapTransform()`) — mouse-wheel and drag update it directly, with `min`/`maxScale` set relative to whatever scale fits the whole map in the pane, so the range makes sense for a tiny starter grid or a world with tens of thousands of tiles alike. A drag only starts panning once the pointer's moved a few pixels; short of that it's treated as a click, so tile selection still works. Basic touch support (one-finger pan, two-finger pinch-zoom) is layered on the same state.
+- **Railroad overlay**: the "Railroads" toggle draws `build_map_html`'s embedded rail-edge JSON (grid-coordinate quadruples, not IDs — see "`map` — HTML grid rendering" above) as a single SVG `<path>` (one `moveto`/`lineto` pair per edge, not one `<line>` element per edge — matters once there are thousands of rail links) over a faded copy of the map. It's built once, right after each map render, and just hidden by CSS (`#rail-overlay { display: none }`, shown via a `.rail-overlay-on` class on `#map-pane`) — so toggling later is a pure class flip with zero JS work, not a rebuild-on-every-click.
+- **Tab-completion**: ported, just not via `readline` (no browser equivalent) — `game.get_completions(world, line, cursor_pos)` in `main.py` exposes the same `COMMAND_NAMES`/`ARG_COMPLETIONS` tables the CLI's completer uses, called directly from JS. Tab (or → at the end of the line) accepts a dimmed inline ghost-text suggestion shown past the cursor as you type; a second Tab with nothing left to complete lists every candidate.
+- **Help modal**: `help` opens a searchable command-reference overlay (`HELP_SECTIONS` in the page's own JS) instead of just printing a pointer to the README, and a live "which argument comes next" hint renders below the input as you type, driven by `main.py`'s `get_current_arg_index()`.
+- **Live info panel**: next to the map, fed by `get_map_info_panel_data(world)`/`get_tile_info(world, node_id)` (both in `main.py`, returning JSON strings so Pyodide callers get a plain JS object via `JSON.parse` instead of a `PyProxy`) — world stats, every country's live GDP/population/growth/color, and a pinned tile's full details on click.
+- **Hosting**: served directly off this repo's `main` branch via GitHub Pages (`https://sanguinius-exe.github.io/nodetech/`), in addition to `python3 -m http.server` for local development — both serve the exact same static files, no build step either way.
 
 Game state lives only in the page's memory for that session — there is no server and nothing is auto-persisted, so a reload starts a fresh, empty `World` unless a save was downloaded first.
+
+## Discord bot ([discord_bot/](discord_bot/))
+
+A third frontend, in its own subdirectory with its own `requirements.txt` (`discord.py`, `python-dotenv`, `Pillow`) — the only place in the project with external dependencies, since the core engine stays stdlib-only. It imports `main.py`/`node.py`/`country.py`/`division.py`/`database.py` from the repo root directly (`sys.path.insert`), the same real game code every other frontend uses. See [discord_bot/README.md](discord_bot/README.md) for the full command list and setup; this is the high-level shape.
+
+- **One `World` per Discord guild**, not one global session — `game_bridge.py` owns `_worlds: dict[int, World]`, loading a guild's world from `discord_bot/data/<guild_id>.json` on first use and auto-saving after every state-changing command. This is a genuine architectural departure from the CLI/web terminal's single-`World`-at-a-time model (see "Known limitations" below) — and, unlike either of those, actually supports multiple people acting on the *same* world concurrently (different Discord members running commands against their own guild's world), gated by a per-guild `asyncio.Lock` so two overlapping commands for the same guild can't race on it.
+- **Command execution**: `game_bridge.run_command(guild_id, line)` redirects stdout (same trick the web terminal uses) around a call to the real `main.run_command()`, then auto-saves. `run_command_async()` wraps that in `asyncio.to_thread` so a slow command can't stall the bot's single event loop (and every other guild's commands) while it runs.
+- **Slash commands, not free text**: almost every CLI command has a dedicated `@tree.command`, with real Discord UX (typed arguments, `@app_commands.choices` for fixed enums, autocomplete against the live world for node/country names) rather than one big "type a command line" box. `/admin <command>` is a raw passthrough for the few things without a dedicated command yet.
+- **Extras with no CLI equivalent**: `/permit`/`/revoke`/`/permissions` let Manage Server holders grant specific roles access to specific admin commands; `/newworld`/`/import` automatically back up whatever world they're about to replace; `/map [country]` can crop to just one country's territory; `/export_country`/`/world_report` generate the same markdown reports `export-country`/`export-world` do, but built directly (`game_bridge.export_country_report()`/`export_world_report()`) rather than by running those commands verbatim, so two guilds exporting at the same time can't collide on the CLI's shared save directory or its single process-global "last export path".
+- **`open`/`save`/`list-worlds`/`rename-world` are unavailable** — file/save-model concepts with no per-guild meaning, since each guild already has exactly one world, auto-saved after every command.
 
 ## Packaging ([pyproject.toml](pyproject.toml))
 
@@ -337,10 +423,10 @@ Flat module layout (no `src/` package directory) declared via `[tool.setuptools]
 - **No migrations for structural changes**: adding/removing/reordering `Enum` members (`BuildingType`/`ResourceType`/`ExtractionSiteType` especially, due to their positional boolean arrays) will break existing save files with no warning beyond a `KeyError`/`ValueError` at load time. Purely additive dataclass fields are handled gracefully (see "Deserialization" above), but anything that changes the *meaning* of existing data is not.
 - **Country GDP/population are eventually-consistent, not live**: see the `Country` snapshot explanation above. `world status` / `country-status` can lie until the next `advance-year` or `forceupdate`. Growth rates (`projections`, `view-country`) don't have this problem — they're always computed live.
 - **No validation that a country's `nodes` list matches reality**: it's hand-maintained by `cmd_setcountry`; direct field mutation elsewhere would desync it from `Node.country`.
-- **`Division.supply_requirement` and `Country.treasury`/`stability` are inert**: modeled and persisted, but no game logic currently reads or changes them based on gameplay (only player commands set them directly).
+- **`Country.treasury`/`stability` are inert**: modeled and persisted, but no game logic currently reads or changes them based on gameplay (only player commands set them directly). `Division.supply_requirement`, in contrast, *is* live now — see "Supply system" above.
 - **Resources aren't tied to terrain or generated procedurally**: `addresource`/`removeresource` set them directly; a `DESERT` node can have `OIL_GAS` if you say so. There's no simulation linking resource placement to terrain type.
-- **No combat**: divisions (including air force ones) can occupy the same node from opposing countries with nothing resolving the conflict.
-- **Single global `World`**: the terminal only ever manages one game at a time in memory; `new-world`/`open` overwrite it rather than switching between multiple loaded worlds.
+- **Combat has no siege/occupation state beyond one exchange**: `resolve_combat()` (see "Combat and war" above) resolves an attack immediately — there's no "under siege" node status, no multi-turn battles, and a node that survives an attack goes right back to normal until someone attacks it again.
+- **Single global `World` in the CLI/web terminal**: each only ever manages one game at a time in memory; `new-world`/`open` overwrite it rather than switching between multiple loaded worlds. The Discord bot is the one exception — it holds one `World` per Discord guild simultaneously (see "Discord bot" above).
 - **Division names are only unique per-country, not globally**: this is intentional (two countries can each field a "1st Infantry"), but means a division "name" alone is never a safe global key outside the context of a known country.
 - **Legacy save files can violate the one-node-per-slot invariant**: `cmd_create` enforces it, but `load_into_world` doesn't re-validate — it just constructs whatever `Node`s the file describes. A save from before the grid existed defaults every node to `(0, 0)`, so loading one with multiple nodes silently puts them all on the same slot; nothing crashes, but `map`'s rendering (and any future spatial logic) would only show one of them at that position.
 - **Node position is set once and never moves**: there's no `move`/`setposition` command, and grid-neighbor auto-connection only happens at `create` time — nothing re-derives `connected_tiles` afterward.
