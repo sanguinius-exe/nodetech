@@ -208,6 +208,11 @@
   /* Fades every tile so the railroad overlay's lines (drawn on top, see #rail-overlay in the
      script below) read clearly against the map instead of competing with tile colors. */
   #map-pane.rail-overlay-on #map-scale-wrapper .tile { opacity: 0.35; }
+  /* The overlay itself is built once per map render regardless of toggle state (see
+     buildRailOverlay's call site in updateMapPane) and just hidden here by default - so
+     clicking the toggle is a pure class flip afterward, never a rebuild. */
+  #rail-overlay { display: none; }
+  #map-pane.rail-overlay-on #rail-overlay { display: block; }
   #rail-overlay path { fill: none; stroke: #e8a33d; stroke-width: 2.5; stroke-linecap: round; }
 
   /* Draggable divider between the top row (terminal + map) and the info panel below - resizes
@@ -716,9 +721,12 @@
       mapContentSize = { width: wrapper.scrollWidth, height: wrapper.scrollHeight };
       resetMapView();
 
-      // The overlay is user preference, not per-render state - if it was on before this
-      // (re-)render, rebuild it against the fresh tile markup rather than turning it off.
-      if (railOverlayOn) buildRailOverlay();
+      // Build the overlay now (hidden by CSS unless already toggled on - see rail-overlay-on)
+      // rather than waiting for the user to click "Railroads": the whole point of building it
+      // once here is that toggling later is then a pure CSS class flip with zero JS work, on
+      // every click after the first, instead of re-walking every edge and rebuilding the SVG
+      // path from scratch each time the button is pressed.
+      buildRailOverlay();
 
       refreshInfoPanel();
     }
@@ -775,12 +783,15 @@
     }
 
     // Railroad overlay: draws every rail-connected pair (mapRailData.edges, from build_map_html's
-    // embedded #rail-edges JSON - see updateMapPane) as lines over a faded copy of the map,
-    // toggled by #map-rail-toggle. The SVG lives *inside* .map itself (not the outer
-    // #map-scale-wrapper), so it shares .map's own coordinate space and gets carried along by
-    // the same pan/zoom transform as the tiles automatically - no re-drawing needed on zoom/pan,
-    // only when the underlying tile markup actually changes (a fresh `map` render) or the
-    // overlay is first turned on.
+    // embedded #rail-edges JSON - see updateMapPane) as lines over a faded copy of the map.
+    // Built once per map render regardless of whether the toggle is on (see buildRailOverlay's
+    // call site in updateMapPane) and left in the DOM either way - #map-rail-toggle then just
+    // flips the rail-overlay-on class (see setRailOverlay), which CSS uses to fade the tiles and
+    // show/hide the SVG. So the only real work (walking every edge, building the path) happens
+    // once per render, never again on the clicks themselves. The SVG lives *inside* .map itself
+    // (not the outer #map-scale-wrapper), so it shares .map's own coordinate space and gets
+    // carried along by the same pan/zoom transform as the tiles automatically - no re-drawing
+    // needed on zoom/pan either.
     //
     // Two things that matter once a world has thousands of tiles and rail links:
     // - Every edge already carries both endpoints' grid coordinates (not IDs), and mapRailData
@@ -825,15 +836,12 @@
     }
 
     function setRailOverlay(on) {
+      // Just a class flip - the overlay itself was already built (see buildRailOverlay's call
+      // site in updateMapPane) and its visibility is pure CSS off the same class, so toggling
+      // does zero JS work here regardless of how many rail links the world has.
       railOverlayOn = on;
       mapPaneEl.classList.toggle("rail-overlay-on", on);
       document.getElementById("map-rail-toggle").classList.toggle("active", on);
-      if (on) {
-        buildRailOverlay();
-      } else {
-        const existing = document.getElementById("rail-overlay");
-        if (existing) existing.remove();
-      }
     }
 
     document.getElementById("map-rail-toggle").addEventListener("click", () => setRailOverlay(!railOverlayOn));
