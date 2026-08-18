@@ -132,6 +132,7 @@ ADMIN_COMMAND_NAMES = {
     "deploy_reserve",
     "move_division",
     "group_attack",
+    "clash",
     "declare_war",
     "make_peace",
     "set_equipment",
@@ -499,6 +500,15 @@ async def move_division(interaction: discord.Interaction, country: str, name: st
 @app_commands.autocomplete(country=country_autocomplete, origin_id=node_autocomplete, destination_id=node_autocomplete)
 async def group_attack(interaction: discord.Interaction, country: str, origin_id: str, destination_id: str) -> None:
     line = game_bridge.build_line("group-attack", country, origin_id, destination_id)
+    await run_admin_line(interaction, line)
+
+
+@tree.command(description="Pit two forces at war against each other - both sides attack at once (admins only)")
+@app_commands.autocomplete(country_a=country_autocomplete, node_a=node_autocomplete, country_b=country_autocomplete, node_b=node_autocomplete)
+async def clash(
+    interaction: discord.Interaction, country_a: str, node_a: str, country_b: str, node_b: str
+) -> None:
+    line = game_bridge.build_line("clash", country_a, node_a, country_b, node_b)
     await run_admin_line(interaction, line)
 
 
