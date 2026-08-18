@@ -542,7 +542,7 @@ async def forceupdate(interaction: discord.Interaction) -> None:
     await run_admin_line(interaction, "forceupdate")
 
 
-@tree.command(description="Run one supply iteration (penalize/recover division morale and equipment) without advancing the year (admins only)")
+@tree.command(description="Run one supply iteration now (penalize/recover morale and equipment) without advancing the year")
 async def apply_supply(interaction: discord.Interaction) -> None:
     await run_admin_line(interaction, "apply-supply")
 
