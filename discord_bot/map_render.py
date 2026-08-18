@@ -99,14 +99,19 @@ TERRAIN_OTHER_COUNTRY_COLOR = (48, 48, 44)  # same muted treatment as HEATMAP_OT
 # uses) and sized by that deployment's total manpower relative to the largest one in view, so a
 # glance shows not just "forces here" but roughly how much. A short type abbreviation (see
 # DIVISION_TYPE_ABBR) for the deployment's dominant type - same "most manpower" rule
-# main.py's _dominant_type() uses for combat matchups - renders on top once the tile is large
-# enough to actually fit text; a "xN" suffix appears too if more than one division is stacked on
-# that tile.
-DIVISION_MARKER_MIN_RADIUS_FRAC = 0.16
-DIVISION_MARKER_MAX_RADIUS_FRAC = 0.42
+# main.py's _dominant_type() uses for combat matchups - renders centered in the marker once the
+# tile is large enough to actually fit text. When more than one division is stacked on that tile,
+# the count gets its own small corner badge instead of being appended to the type label - cramming
+# both into one string (the old "INF×2") easily overflowed a small marker, and "×" isn't even in
+# PIL's default bitmap font.
+DIVISION_MARKER_MIN_RADIUS_FRAC = 0.24
+DIVISION_MARKER_MAX_RADIUS_FRAC = 0.46
 DIVISION_MARKER_OUTLINE = (18, 18, 20)
 DIVISION_MARKER_TEXT_MIN_TILE_SIZE = 16
 DIVISION_MARKER_FONT_SIZE = 9
+DIVISION_MARKER_BADGE_MIN_RADIUS = 9.0  # marker must be at least this big before a count badge is added on top
+DIVISION_MARKER_BADGE_BG = (224, 64, 48)  # a color no country in MAP_TILE_COLORS uses, so it never blends in
+DIVISION_MARKER_BADGE_TEXT = (250, 250, 250)
 DIVISION_TYPE_ABBR: dict[str, str] = {
     "INFANTRY": "INF",
     "ARMOR": "ARM",
@@ -281,15 +286,38 @@ def _draw_division_marker(
     draw.ellipse([cx - radius, cy - radius, cx + radius, cy + radius], fill=color, outline=DIVISION_MARKER_OUTLINE, width=1)
     if tile_size < DIVISION_MARKER_TEXT_MIN_TILE_SIZE:
         return
+    # The type label and the "how many" count are two different pieces of information, so they
+    # get two different visual slots instead of being crammed into one string (which used to
+    # overflow a small marker - "INF×2" is 5 characters trying to fit a ~14px circle, and the "×"
+    # character isn't even in PIL's default bitmap font, so it rendered as garbage on top of
+    # that). The type stays centered in the main circle; the count gets its own small badge
+    # pinned to the marker's upper-right corner, only when there's more than one division.
     label = DIVISION_TYPE_ABBR.get(dominant_type, "?")
-    if division_count > 1:
-        label += f"×{division_count}"
     text_width = scratch.textlength(label, font=marker_font)
     # Dark or light label text depending on the marker's own brightness, so it stays legible
     # against any of assign_country_colors()'s palette rather than just the darker half of it.
     brightness = 0.299 * color[0] + 0.587 * color[1] + 0.114 * color[2]
     text_color = (20, 20, 20) if brightness > 140 else (240, 240, 240)
     draw.text((cx - text_width / 2, cy - DIVISION_MARKER_FONT_SIZE / 2), label, font=marker_font, fill=text_color)
+
+    if division_count > 1 and radius >= DIVISION_MARKER_BADGE_MIN_RADIUS:
+        count_text = str(division_count) if division_count < 10 else "9+"
+        badge_radius = max(5.0, DIVISION_MARKER_FONT_SIZE / 2 + 2)
+        badge_cx = cx + radius * 0.75
+        badge_cy = cy - radius * 0.75
+        draw.ellipse(
+            [badge_cx - badge_radius, badge_cy - badge_radius, badge_cx + badge_radius, badge_cy + badge_radius],
+            fill=DIVISION_MARKER_BADGE_BG,
+            outline=BACKGROUND,
+            width=1,
+        )
+        count_width = scratch.textlength(count_text, font=marker_font)
+        draw.text(
+            (badge_cx - count_width / 2, badge_cy - DIVISION_MARKER_FONT_SIZE / 2),
+            count_text,
+            font=marker_font,
+            fill=DIVISION_MARKER_BADGE_TEXT,
+        )
 
 
 def _wrap_legend(names: list[str], font: ImageFont.FreeTypeFont, max_width: float) -> list[list[str]]:
