@@ -5,10 +5,12 @@ render_map() colors come straight from main.py's own assign_country_colors()/MAP
 MAP_UNCLAIMED_COLOR/MAP_EMPTY_COLOR, so a country's color here always matches what the CLI's
 `map` command and the web terminal already show it as - one palette, not a second one to keep in
 sync. render_heatmap() instead colors one country's own tiles by population or GDP along its own
-gradient (HEATMAP_STOPS) - there's no equivalent in the CLI/web terminal, since a static image is
-what makes a heatmap useful here (no hover to check exact numbers tile-by-tile). Both share the
-same page chrome (dark background, 1px gaps between tiles, a year badge, coordinate axis labels)
-mirroring main.py's MAP_CSS_TEMPLATE, for one visual language across every frontend.
+gradient (HEATMAP_STOPS), and render_terrain() colors them by Terrain along a fixed categorical
+palette (TERRAIN_COLORS) - neither has an equivalent in the CLI/web terminal, since a static image
+is what makes them useful here (no hover to check exact numbers or terrain tile-by-tile). All
+three share the same page chrome (dark background, 1px gaps between tiles, a year badge,
+coordinate axis labels) mirroring main.py's MAP_CSS_TEMPLATE, for one visual language across
+every frontend.
 """
 
 from __future__ import annotations
@@ -76,6 +78,20 @@ SCALE_BAR_WIDTH = 220
 SCALE_BAR_HEIGHT = 12
 SCALE_BAR_TOP_MARGIN = 20
 SCALE_LABEL_FONT_SIZE = 12
+
+# render_terrain's palette - one fixed color per Terrain value, chosen to read intuitively at a
+# glance (greens for vegetation, blue for water, sand for desert, gray tones for bare rock/urban)
+# rather than matching any in-game mechanical color scheme.
+TERRAIN_COLORS: dict[str, tuple[int, int, int]] = {
+    "PLAINS": (168, 194, 86),
+    "FOREST": (45, 90, 39),
+    "HILLS": (163, 148, 82),
+    "MOUNTAIN": (120, 112, 102),
+    "DESERT": (224, 192, 104),
+    "WATER": (47, 111, 168),
+    "URBAN": (150, 150, 165),
+}
+TERRAIN_OTHER_COUNTRY_COLOR = (48, 48, 44)  # same muted treatment as HEATMAP_OTHER_COUNTRY_COLOR
 
 
 def _heat_color(t: float) -> tuple[int, int, int]:
@@ -485,6 +501,119 @@ def render_heatmap(
         font=scale_font,
         fill=TEXT_COLOR,
     )
+
+    buffer = io.BytesIO()
+    image.save(buffer, format="PNG")
+    buffer.seek(0)
+    return buffer
+
+
+def render_terrain(world: World, country_name: str, title: Optional[str] = None) -> io.BytesIO:
+    """A PNG of one country's own territory colored by Terrain (see TERRAIN_COLORS) instead of by
+    owning country or by population/GDP - useful for reading a border at a glance the way
+    TERRAIN_TYPE_MODIFIERS/MATCHUP_MODIFIERS actually do (armor wants the plains/desert tiles,
+    infantry wants the forest/mountain/urban ones). Tiles belonging to other countries within the
+    cropped region are shown muted (same treatment as render_heatmap), and empty grid slots stay
+    the standard background color, so the target country's own shape is what stands out. Raises
+    ValueError (via _country_bounds) if the country doesn't exist or owns no nodes. Returns a
+    ready-to-send BytesIO, already seeked to the start."""
+    country = world.countries.get(country_name)
+    if country is None:
+        raise ValueError(f"No such country '{country_name}'.")
+
+    min_x, min_y, max_x, max_y = _country_bounds(world, country_name)
+    region_width = max_x - min_x + 1
+    region_height = max_y - min_y + 1
+    title = f"{title} - {country_name} (Terrain)" if title else f"{country_name} (Terrain)"
+
+    tile_size = max(4, min(32, 2000 // max(region_width, region_height, 1)))
+    other_color = TERRAIN_OTHER_COUNTRY_COLOR
+    empty_color = _hex_to_rgb(game.MAP_EMPTY_COLOR)
+    grid = {(n.x, n.y): n for n in world.nodes.values()}
+    own_cells = {(n.x, n.y): n for node_id in country.nodes if (n := world.nodes.get(node_id)) is not None}
+
+    title_font = ImageFont.load_default(size=TITLE_FONT_SIZE)
+    badge_font = ImageFont.load_default(size=BADGE_FONT_SIZE)
+    legend_font = ImageFont.load_default(size=LEGEND_FONT_SIZE)
+    axis_font = ImageFont.load_default(size=AXIS_FONT_SIZE)
+
+    map_width = region_width * tile_size + (region_width - 1) * TILE_GAP
+    map_height = region_height * tile_size + (region_height - 1) * TILE_GAP
+
+    tile_stride = tile_size + TILE_GAP
+    x_labels = _axis_label_positions(min_x, max_x, _axis_label_step(region_width, tile_stride))
+    y_labels = _axis_label_positions(min_y, max_y, _axis_label_step(region_height, tile_stride))
+
+    scratch = ImageDraw.Draw(Image.new("RGB", (1, 1)))
+    y_axis_width, x_axis_height = _axis_margins(y_labels, axis_font, scratch)
+
+    content_width = y_axis_width + map_width
+    content_height = x_axis_height + map_height
+
+    legend_names = sorted({node.terrain.name for node in own_cells.values()})
+    legend_rows = _wrap_legend(legend_names, legend_font, map_width)
+    legend_height = LEGEND_TOP_MARGIN + len(legend_rows) * LEGEND_ROW_HEIGHT if legend_rows else 0
+
+    year_text = f"Year {world.year}"
+    badge_width = scratch.textlength(year_text, font=badge_font) + BADGE_PADDING_X * 2
+    badge_height = BADGE_FONT_SIZE + BADGE_PADDING_Y
+    title_width = scratch.textlength(title, font=title_font) if title else 0
+    header_width = title_width + (30 if title else 0) + badge_width
+
+    canvas_width = round(max(content_width, header_width) + PAGE_PADDING * 2)
+    canvas_height = PAGE_PADDING + HEADER_HEIGHT + content_height + legend_height + PAGE_PADDING
+
+    image = Image.new("RGB", (canvas_width, canvas_height), BACKGROUND)
+    draw = ImageDraw.Draw(image)
+
+    if title:
+        draw.text((PAGE_PADDING, PAGE_PADDING), title, font=title_font, fill=TEXT_COLOR)
+
+    badge_left = canvas_width - PAGE_PADDING - badge_width
+    draw.rounded_rectangle(
+        [badge_left, PAGE_PADDING, badge_left + badge_width, PAGE_PADDING + badge_height], radius=8, fill=BADGE_BG
+    )
+    draw.text(
+        (badge_left + BADGE_PADDING_X, PAGE_PADDING + (badge_height - BADGE_FONT_SIZE) / 2 - 1),
+        year_text,
+        font=badge_font,
+        fill=TEXT_COLOR,
+    )
+
+    content_left = (canvas_width - content_width) / 2
+    grid_left = content_left + y_axis_width
+    grid_top = PAGE_PADDING + HEADER_HEIGHT + x_axis_height
+
+    _draw_axis_labels(
+        draw, scratch, axis_font, x_labels, y_labels, min_x, min_y, tile_stride, tile_size,
+        grid_left, grid_top, x_axis_height, y_axis_width,
+    )
+
+    for y in range(min_y, max_y + 1):
+        for x in range(min_x, max_x + 1):
+            node = own_cells.get((x, y))
+            if node is not None:
+                color = TERRAIN_COLORS.get(node.terrain.name, other_color)
+            elif (x, y) in grid:
+                color = other_color
+            else:
+                color = empty_color
+            left = grid_left + (x - min_x) * tile_stride
+            top = grid_top + (y - min_y) * tile_stride
+            draw.rectangle([left, top, left + tile_size - 1, top + tile_size - 1], fill=color)
+
+    legend_y = grid_top + map_height + LEGEND_TOP_MARGIN
+    for row in legend_rows:
+        x = grid_left
+        for name in row:
+            draw.rounded_rectangle(
+                [x, legend_y + 4, x + LEGEND_SWATCH_SIZE, legend_y + 4 + LEGEND_SWATCH_SIZE],
+                radius=2,
+                fill=TERRAIN_COLORS.get(name, other_color),
+            )
+            draw.text((x + LEGEND_SWATCH_SIZE + 6, legend_y), name.title(), font=legend_font, fill=TEXT_COLOR)
+            x += LEGEND_SWATCH_SIZE + 6 + draw.textlength(name.title(), font=legend_font) + LEGEND_ITEM_GAP
+        legend_y += LEGEND_ROW_HEIGHT
 
     buffer = io.BytesIO()
     image.save(buffer, format="PNG")
