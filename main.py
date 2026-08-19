@@ -1638,6 +1638,25 @@ COMBAT_RANDOMNESS_RANGE = (0.85, 1.15)
 # retreat.
 RETREAT_MANPOWER_THRESHOLD = 0.35
 
+# The raw strength-ratio loss fraction (opposing side's strength / total strength) is dampened by
+# this before being applied, so a single exchange is rarely decisive on its own - even a totally
+# one-sided battle caps out around a 50% loss for the overpowered side, rather than being able to
+# wipe it out in one hit. Wars grind through several engagements (helped along by the retreat
+# system above) instead of being settled in a single clash.
+CASUALTY_SEVERITY = 0.5
+# On top of that dampening, each division rolls its own casualties independently within this
+# range around the side's average - the same "nobody gets the exact same roll" idea
+# COMBAT_RANDOMNESS_RANGE already applies to strength, extended to how the losses land, so two
+# divisions on the same side in the same battle don't always take identical percentage losses.
+CASUALTY_VARIATION_RANGE = (0.6, 1.4)
+
+
+def _apply_casualties(divisions: list[Division], side_loss_fraction: float) -> None:
+    for division in divisions:
+        individual_fraction = side_loss_fraction * CASUALTY_SEVERITY * random.uniform(*CASUALTY_VARIATION_RANGE)
+        individual_fraction = max(0.0, min(1.0, individual_fraction))
+        division.manpower = max(0, round(division.manpower * (1 - individual_fraction)))
+
 
 def _find_friendly_neighbor(world: World, node: Node, country: str) -> Node | None:
     """The first of `node`'s connected_tiles owned by `country`, or None if there isn't one -
@@ -1711,9 +1730,12 @@ def resolve_combat(
     and MATCHUP_MODIFIERS (how this division's type fares against whichever type makes up most of
     the opposing side's manpower - armor breaks infantry lines but struggles against artillery,
     cavalry runs down artillery but folds against armor, and so on). The weaker side bleeds more,
-    but neither side comes out unscathed, and the resulting loss fraction applies evenly across
-    every division on that side. The attackers only take the node if every defender there is
-    wiped and at least one attacker survives; otherwise attacker survivors retreat to `origin`
+    but neither side comes out unscathed - the resulting loss fraction is dampened
+    (CASUALTY_SEVERITY) and then rolled independently per division (CASUALTY_VARIATION_RANGE,
+    see _apply_casualties), so a single exchange rarely wipes anyone out on its own and two
+    divisions on the same side don't take identical losses. The attackers only take the node if
+    every defender there is wiped and at least one attacker survives; otherwise attacker survivors
+    retreat to `origin`
     with whatever losses they took, and any defender survivor ground down below
     RETREAT_MANPOWER_THRESHOLD breaks and pulls back to a friendly neighboring node rather than
     holding a position it's no longer fit to defend (see _find_friendly_neighbor) - or holds
@@ -1752,16 +1774,16 @@ def resolve_combat(
     attacker_loss_fraction = total_defender_strength / total_strength
     defender_loss_fraction = total_attacker_strength / total_strength
 
-    for division in attackers:
-        division.manpower = max(0, round(division.manpower * (1 - attacker_loss_fraction)))
-    for division in defenders:
-        division.manpower = max(0, round(division.manpower * (1 - defender_loss_fraction)))
+    _apply_casualties(attackers, attacker_loss_fraction)
+    _apply_casualties(defenders, defender_loss_fraction)
 
     attacker_casualties = attacker_manpower_before - sum(d.manpower for d in attackers)
     defender_casualties = defender_manpower_before - sum(d.manpower for d in defenders)
+    attacker_casualty_pct = attacker_casualties / attacker_manpower_before if attacker_manpower_before else 0.0
+    defender_casualty_pct = defender_casualties / defender_manpower_before if defender_manpower_before else 0.0
     print(
-        f"  Casualties - {attacker_country}: {attacker_casualties:,} ({attacker_loss_fraction:.0%}), "
-        f"{defender_country}: {defender_casualties:,} ({defender_loss_fraction:.0%})."
+        f"  Casualties - {attacker_country}: {attacker_casualties:,} ({attacker_casualty_pct:.0%}), "
+        f"{defender_country}: {defender_casualties:,} ({defender_casualty_pct:.0%})."
     )
 
     destroyed_defenders = [d for d in defenders if d.manpower <= 0]
@@ -1858,8 +1880,9 @@ def resolve_clash(world: World, country_a: str, node_a: Node, country_b: str, no
     """A mutual engagement between two forces that are *both* on the attack - unlike
     resolve_combat, where one side is a static defender getting TERRAIN_DEFENSE_MODIFIERS, here
     both sides are pressing an assault from their own ground, so both use the ATTACK terrain
-    modifiers (from their own node's terrain). Casualties are proportional exactly as in
-    resolve_combat. Whichever side is completely wiped loses its node to the other side's
+    modifiers (from their own node's terrain). Casualties are dampened and rolled per-division
+    exactly as in resolve_combat (see _apply_casualties). Whichever side is completely wiped
+    loses its node to the other side's
     survivors, who overrun it; if both sides still have survivors, neither node changes hands, but
     any survivor ground down below RETREAT_MANPOWER_THRESHOLD breaks and pulls back to a friendly
     neighboring node of its own side rather than holding a position it's no longer fit to defend -
@@ -1896,16 +1919,16 @@ def resolve_clash(world: World, country_a: str, node_a: Node, country_b: str, no
     loss_fraction_a = total_strength_b / total_strength
     loss_fraction_b = total_strength_a / total_strength
 
-    for division in divisions_a:
-        division.manpower = max(0, round(division.manpower * (1 - loss_fraction_a)))
-    for division in divisions_b:
-        division.manpower = max(0, round(division.manpower * (1 - loss_fraction_b)))
+    _apply_casualties(divisions_a, loss_fraction_a)
+    _apply_casualties(divisions_b, loss_fraction_b)
 
     casualties_a = manpower_before_a - sum(d.manpower for d in divisions_a)
     casualties_b = manpower_before_b - sum(d.manpower for d in divisions_b)
+    casualty_pct_a = casualties_a / manpower_before_a if manpower_before_a else 0.0
+    casualty_pct_b = casualties_b / manpower_before_b if manpower_before_b else 0.0
     print(
-        f"  Casualties - {country_a}: {casualties_a:,} ({loss_fraction_a:.0%}), "
-        f"{country_b}: {casualties_b:,} ({loss_fraction_b:.0%})."
+        f"  Casualties - {country_a}: {casualties_a:,} ({casualty_pct_a:.0%}), "
+        f"{country_b}: {casualties_b:,} ({casualty_pct_b:.0%})."
     )
 
     def _cull(divisions: list[Division], deployment: MilitaryDeployment | None, node: Node) -> tuple[list[Division], list[Division]]:
