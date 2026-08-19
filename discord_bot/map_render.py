@@ -5,12 +5,15 @@ render_map() colors come straight from main.py's own assign_country_colors()/MAP
 MAP_UNCLAIMED_COLOR/MAP_EMPTY_COLOR, so a country's color here always matches what the CLI's
 `map` command and the web terminal already show it as - one palette, not a second one to keep in
 sync. render_heatmap() instead colors one country's own tiles by population or GDP along its own
-gradient (HEATMAP_STOPS), and render_terrain() colors them by Terrain along a fixed categorical
-palette (TERRAIN_COLORS) - neither has an equivalent in the CLI/web terminal, since a static image
-is what makes them useful here (no hover to check exact numbers or terrain tile-by-tile). All
-three share the same page chrome (dark background, 1px gaps between tiles, a year badge,
-coordinate axis labels) mirroring main.py's MAP_CSS_TEMPLATE, for one visual language across
-every frontend.
+gradient (HEATMAP_STOPS), render_terrain() colors them by Terrain along a fixed categorical
+palette (TERRAIN_COLORS), and render_railroads() reuses that same terrain base with the country's
+domestic rail network (rail_connected_tiles) drawn on top in the same amber the web terminal's
+own #rail-overlay uses (RAIL_LINE_COLOR) - the last one is Discord's answer to a feature the web
+terminal already has (its rail-toggle on the interactive map); heatmap and terrain-coloring have
+no equivalent there at all, since a static image is what makes them useful here (no hover to check
+exact numbers or terrain tile-by-tile). All four share the same page chrome (dark background, 1px
+gaps between tiles, a year badge, coordinate axis labels) mirroring main.py's MAP_CSS_TEMPLATE,
+for one visual language across every frontend.
 """
 
 from __future__ import annotations
@@ -92,6 +95,11 @@ TERRAIN_COLORS: dict[str, tuple[int, int, int]] = {
     "URBAN": (150, 150, 165),
 }
 TERRAIN_OTHER_COUNTRY_COLOR = (48, 48, 44)  # same muted treatment as HEATMAP_OTHER_COUNTRY_COLOR
+
+# render_railroads' line color - the same #e8a33d amber the web terminal's #rail-overlay already
+# uses for rail edges, so a rail line reads as "the same thing" whether you're looking at the web
+# map or a Discord PNG.
+RAIL_LINE_COLOR = (232, 163, 61)
 
 # render_terrain's division-marker overlay: one dot per country's deployment on a tile (both the
 # target country's own and any other country's, visible within the crop - reading a border means
@@ -773,6 +781,160 @@ def render_terrain(world: World, country_name: str, title: Optional[str] = None)
                 draw.text((x + LEGEND_SWATCH_SIZE + 6, legend_y), name, font=legend_font, fill=TEXT_COLOR)
                 x += LEGEND_SWATCH_SIZE + 6 + draw.textlength(name, font=legend_font) + LEGEND_ITEM_GAP
             legend_y += LEGEND_ROW_HEIGHT
+
+    buffer = io.BytesIO()
+    image.save(buffer, format="PNG")
+    buffer.seek(0)
+    return buffer
+
+
+def _country_rail_edges(world: World, country_name: str) -> list[tuple[tuple[int, int], tuple[int, int]]]:
+    """[(x1,y1), (x2,y2)] tile-coordinate pairs for every rail link between two of this country's
+    own nodes - deduplicated, since rail_connected_tiles is stored on both ends of a link. A link
+    to a tile some other country owns (or that no longer exists) is skipped; a domestic rail map
+    has nothing useful to say about someone else's territory."""
+    own_nodes = {
+        node_id: n for node_id in world.countries[country_name].nodes if (n := world.nodes.get(node_id)) is not None
+    }
+    seen: set[frozenset[str]] = set()
+    edges = []
+    for node_id, node in own_nodes.items():
+        for neighbor_id in node.rail_connected_tiles:
+            neighbor = own_nodes.get(neighbor_id)
+            if neighbor is None:
+                continue
+            pair = frozenset((node_id, neighbor_id))
+            if pair in seen:
+                continue
+            seen.add(pair)
+            edges.append(((node.x, node.y), (neighbor.x, neighbor.y)))
+    return edges
+
+
+def render_railroads(world: World, country_name: str, title: Optional[str] = None) -> io.BytesIO:
+    """A PNG of one country's own territory (same terrain-colored base as render_terrain, since
+    rail routing is shaped by the ground it crosses) with its domestic rail network drawn on top -
+    one line per rail_connected_tiles link between two of the country's own nodes, in the same
+    amber (#e8a33d) the web terminal's rail overlay already uses. Raises ValueError (via
+    _country_bounds) if the country doesn't exist or owns no nodes. Returns a ready-to-send
+    BytesIO, already seeked to the start."""
+    country = world.countries.get(country_name)
+    if country is None:
+        raise ValueError(f"No such country '{country_name}'.")
+
+    min_x, min_y, max_x, max_y = _country_bounds(world, country_name)
+    region_width = max_x - min_x + 1
+    region_height = max_y - min_y + 1
+    title = f"{title} - {country_name} (Rail Network)" if title else f"{country_name} (Rail Network)"
+
+    tile_size = max(4, min(32, 2000 // max(region_width, region_height, 1)))
+    other_color = TERRAIN_OTHER_COUNTRY_COLOR
+    empty_color = _hex_to_rgb(game.MAP_EMPTY_COLOR)
+    grid = {(n.x, n.y): n for n in world.nodes.values()}
+    own_cells = {(n.x, n.y): n for node_id in country.nodes if (n := world.nodes.get(node_id)) is not None}
+    rail_edges = _country_rail_edges(world, country_name)
+    rail_line_width = max(2, tile_size // 5)
+
+    title_font = ImageFont.load_default(size=TITLE_FONT_SIZE)
+    badge_font = ImageFont.load_default(size=BADGE_FONT_SIZE)
+    legend_font = ImageFont.load_default(size=LEGEND_FONT_SIZE)
+    axis_font = ImageFont.load_default(size=AXIS_FONT_SIZE)
+
+    map_width = region_width * tile_size + (region_width - 1) * TILE_GAP
+    map_height = region_height * tile_size + (region_height - 1) * TILE_GAP
+
+    tile_stride = tile_size + TILE_GAP
+    x_labels = _axis_label_positions(min_x, max_x, _axis_label_step(region_width, tile_stride))
+    y_labels = _axis_label_positions(min_y, max_y, _axis_label_step(region_height, tile_stride))
+
+    scratch = ImageDraw.Draw(Image.new("RGB", (1, 1)))
+    y_axis_width, x_axis_height = _axis_margins(y_labels, axis_font, scratch)
+
+    content_width = y_axis_width + map_width
+    content_height = x_axis_height + map_height
+
+    legend_names = sorted({node.terrain.name for node in own_cells.values()})
+    legend_rows = _wrap_legend(legend_names, legend_font, map_width)
+    legend_height = LEGEND_TOP_MARGIN + len(legend_rows) * LEGEND_ROW_HEIGHT if legend_rows else 0
+    rail_legend_height = LEGEND_TOP_MARGIN + LEGEND_ROW_HEIGHT if rail_edges else 0
+
+    year_text = f"Year {world.year}"
+    badge_width = scratch.textlength(year_text, font=badge_font) + BADGE_PADDING_X * 2
+    badge_height = BADGE_FONT_SIZE + BADGE_PADDING_Y
+    title_width = scratch.textlength(title, font=title_font) if title else 0
+    header_width = title_width + (30 if title else 0) + badge_width
+
+    canvas_width = round(max(content_width, header_width) + PAGE_PADDING * 2)
+    canvas_height = (
+        PAGE_PADDING + HEADER_HEIGHT + content_height + legend_height + rail_legend_height + PAGE_PADDING
+    )
+
+    image = Image.new("RGB", (canvas_width, canvas_height), BACKGROUND)
+    draw = ImageDraw.Draw(image)
+
+    if title:
+        draw.text((PAGE_PADDING, PAGE_PADDING), title, font=title_font, fill=TEXT_COLOR)
+
+    badge_left = canvas_width - PAGE_PADDING - badge_width
+    draw.rounded_rectangle(
+        [badge_left, PAGE_PADDING, badge_left + badge_width, PAGE_PADDING + badge_height], radius=8, fill=BADGE_BG
+    )
+    draw.text(
+        (badge_left + BADGE_PADDING_X, PAGE_PADDING + (badge_height - BADGE_FONT_SIZE) / 2 - 1),
+        year_text,
+        font=badge_font,
+        fill=TEXT_COLOR,
+    )
+
+    content_left = (canvas_width - content_width) / 2
+    grid_left = content_left + y_axis_width
+    grid_top = PAGE_PADDING + HEADER_HEIGHT + x_axis_height
+
+    _draw_axis_labels(
+        draw, scratch, axis_font, x_labels, y_labels, min_x, min_y, tile_stride, tile_size,
+        grid_left, grid_top, x_axis_height, y_axis_width,
+    )
+
+    for y in range(min_y, max_y + 1):
+        for x in range(min_x, max_x + 1):
+            node = own_cells.get((x, y))
+            if node is not None:
+                color = TERRAIN_COLORS.get(node.terrain.name, other_color)
+            elif (x, y) in grid:
+                color = other_color
+            else:
+                color = empty_color
+            left = grid_left + (x - min_x) * tile_stride
+            top = grid_top + (y - min_y) * tile_stride
+            draw.rectangle([left, top, left + tile_size - 1, top + tile_size - 1], fill=color)
+
+    def tile_center(x: int, y: int) -> tuple[float, float]:
+        return (
+            grid_left + (x - min_x) * tile_stride + tile_size / 2,
+            grid_top + (y - min_y) * tile_stride + tile_size / 2,
+        )
+
+    for (x1, y1), (x2, y2) in rail_edges:
+        draw.line([tile_center(x1, y1), tile_center(x2, y2)], fill=RAIL_LINE_COLOR, width=rail_line_width)
+
+    legend_y = grid_top + map_height + LEGEND_TOP_MARGIN
+    for row in legend_rows:
+        x = grid_left
+        for name in row:
+            draw.rounded_rectangle(
+                [x, legend_y + 4, x + LEGEND_SWATCH_SIZE, legend_y + 4 + LEGEND_SWATCH_SIZE],
+                radius=2,
+                fill=TERRAIN_COLORS.get(name, other_color),
+            )
+            draw.text((x + LEGEND_SWATCH_SIZE + 6, legend_y), name.title(), font=legend_font, fill=TEXT_COLOR)
+            x += LEGEND_SWATCH_SIZE + 6 + draw.textlength(name.title(), font=legend_font) + LEGEND_ITEM_GAP
+        legend_y += LEGEND_ROW_HEIGHT
+
+    if rail_edges:
+        legend_y += LEGEND_TOP_MARGIN
+        line_y = legend_y + LEGEND_SWATCH_SIZE / 2
+        draw.line([(grid_left, line_y), (grid_left + 20, line_y)], fill=RAIL_LINE_COLOR, width=rail_line_width)
+        draw.text((grid_left + 28, legend_y), f"Rail line ({len(rail_edges)} segments)", font=legend_font, fill=TEXT_COLOR)
 
     buffer = io.BytesIO()
     image.save(buffer, format="PNG")

@@ -857,6 +857,25 @@ async def terrainview(interaction: discord.Interaction, country: str) -> None:
     await interaction.followup.send(file=discord.File(buffer, filename="terrainview.png"))
 
 
+@tree.command(description="Render a map of one country's domestic rail network")
+@app_commands.describe(country="Which country to show")
+@app_commands.autocomplete(country=country_autocomplete)
+async def railview(interaction: discord.Interaction, country: str) -> None:
+    await interaction.response.defer()
+    world_obj = game_bridge.get_world(interaction.guild_id)
+    if not world_obj.nodes:
+        await interaction.followup.send("No nodes yet.")
+        return
+    title = interaction.guild.name if interaction.guild else None
+    async with game_bridge.get_lock(interaction.guild_id):
+        try:
+            buffer = await asyncio.to_thread(map_render.render_railroads, world_obj, country, title)
+        except ValueError as e:
+            await interaction.followup.send(str(e))
+            return
+    await interaction.followup.send(file=discord.File(buffer, filename="railview.png"))
+
+
 @tree.command(description="Download this server's world as a save file")
 async def export(interaction: discord.Interaction) -> None:
     await interaction.response.defer()
