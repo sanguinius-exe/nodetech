@@ -400,6 +400,12 @@ MAP_TILE_COLORS = [
 ]
 MAP_UNCLAIMED_COLOR = "#5a5a63"
 MAP_EMPTY_COLOR = "#232326"
+# A tile with Node.last_captured_year == world.year (see _occupy_node) gets this bright outline
+# instead of its usual quiet border - a bold, saturated gold that reads clearly against every
+# entry in MAP_TILE_COLORS/MAP_UNCLAIMED_COLOR without being close to any of them, and distinct
+# from map_render.py's own RAIL_LINE_COLOR (amber) and DIVISION_MARKER_BADGE_BG (red) so none of
+# the map's existing accent colors get mistaken for this one.
+RECENTLY_CAPTURED_OUTLINE_COLOR = "#ffd60a"
 # The single source of truth for the web map's tile spacing - both the CSS below and the pixel
 # math the railroad overlay does from grid coordinates (see build_map_html's rail_data) have to
 # agree on this, so it's one constant instead of "1px" hardcoded in two places that could drift.
@@ -508,6 +514,11 @@ MAP_CSS_TEMPLATE = """
   .tile { flex-shrink: 0; }
   .tile:not(.empty):hover { outline: 2px solid #fff; outline-offset: -2px; cursor: default; }
   .tile.empty { background: __EMPTY_COLOR__; }
+  .tile.recently-captured {
+    outline: 3px solid __RECENTLY_CAPTURED_COLOR__;
+    outline-offset: -3px;
+    box-shadow: 0 0 6px __RECENTLY_CAPTURED_COLOR__;
+  }
   .legend { margin-top: 20px; display: flex; flex-wrap: wrap; gap: 12px 20px; font-size: 13px; }
   .legend-item { display: flex; align-items: center; gap: 6px; }
   .swatch { width: 12px; height: 12px; border-radius: 2px; display: inline-block; flex-shrink: 0; }
@@ -573,8 +584,9 @@ def build_map_html(world: World, bounds: tuple[int, int, int, int] | None = None
         if node is None:
             return f'<div class="tile empty" style="width:{tile_size}px;height:{tile_size}px"></div>'
         color = country_colors[node.country] if node.country else MAP_UNCLAIMED_COLOR
+        css_class = "tile recently-captured" if node.last_captured_year == world.year else "tile"
         return (
-            f'<div class="tile" style="width:{tile_size}px;height:{tile_size}px;background:{color}" '
+            f'<div class="{css_class}" style="width:{tile_size}px;height:{tile_size}px;background:{color}" '
             f'data-id="{_escape_html(node.id)}" data-x="{node.x}" data-y="{node.y}" '
             f'data-country="{_escape_html(node.country or "unclaimed")}" '
             f'data-terrain="{node.terrain.name}" '
@@ -632,7 +644,11 @@ def build_map_html(world: World, bounds: tuple[int, int, int, int] | None = None
         ],
     }
 
-    css = MAP_CSS_TEMPLATE.replace("__EMPTY_COLOR__", MAP_EMPTY_COLOR).replace("__TILE_GAP__", str(MAP_TILE_GAP_PX))
+    css = (
+        MAP_CSS_TEMPLATE.replace("__EMPTY_COLOR__", MAP_EMPTY_COLOR)
+        .replace("__TILE_GAP__", str(MAP_TILE_GAP_PX))
+        .replace("__RECENTLY_CAPTURED_COLOR__", RECENTLY_CAPTURED_OUTLINE_COLOR)
+    )
 
     return f"""<!doctype html>
 <html>
@@ -1922,7 +1938,10 @@ def _occupy_node(world: World, node: Node, new_owner: str, old_owner: str | None
     for `new_owner`, updates each division's `.location`, and transfers `node` itself from
     `old_owner` to `new_owner`. Shared by resolve_combat's clean-sweep case and resolve_clash's
     overrun case - both end with "this side's survivors now hold what used to be the other
-    side's ground"."""
+    side's ground". This is the only way a node's owner ever changes via combat (both callers are
+    already war-gated), so stamping last_captured_year here doubles as "changed hands in this
+    war" - the map renderers use it to outline the tile until the year turns over (see
+    RECENTLY_CAPTURED_OUTLINE_COLOR)."""
     new_deployment = next((d for d in node.military_deployments if d.country == new_owner), None)
     if new_deployment is None:
         new_deployment = MilitaryDeployment(country=new_owner)
@@ -1935,6 +1954,7 @@ def _occupy_node(world: World, node: Node, new_owner: str, old_owner: str | None
     if old_country is not None and node.id in old_country.nodes:
         old_country.nodes.remove(node.id)
     node.country = new_owner
+    node.last_captured_year = world.year
     new_country = world.get_country(new_owner)
     if new_country is not None and node.id not in new_country.nodes:
         new_country.nodes.append(node.id)

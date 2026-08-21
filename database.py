@@ -129,6 +129,7 @@ def _node_to_dict(node: Node) -> dict[str, Any]:
         "population_growth_rate": node.population_growth_rate,
         "military_deployments": [_deployment_to_dict(d) for d in node.military_deployments],
         "projected_population_growth_rate": node.projected_population_growth_rate,
+        "last_captured_year": node.last_captured_year,
     }
 
 
@@ -150,6 +151,7 @@ def _node_from_dict(data: dict[str, Any]) -> Node:
         population_growth_rate=data["population_growth_rate"],
         military_deployments=[_deployment_from_dict(d) for d in data["military_deployments"]],
         projected_population_growth_rate=data.get("projected_population_growth_rate", 0.0),
+        last_captured_year=data.get("last_captured_year"),
     )
 
 

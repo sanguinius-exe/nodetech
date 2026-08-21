@@ -101,6 +101,12 @@ TERRAIN_OTHER_COUNTRY_COLOR = (48, 48, 44)  # same muted treatment as HEATMAP_OT
 # map or a Discord PNG.
 RAIL_LINE_COLOR = (232, 163, 61)
 
+# render_map's outline for a tile with Node.last_captured_year == world.year - the same #ffd60a
+# gold main.py's own build_map_html uses for the identical highlight, so a tile that just changed
+# hands reads the same way in the CLI/web terminal and in Discord.
+RECENTLY_CAPTURED_OUTLINE_COLOR = (255, 214, 10)
+RECENTLY_CAPTURED_OUTLINE_WIDTH = 3
+
 # render_terrain's division-marker overlay: one dot per country's deployment on a tile (both the
 # target country's own and any other country's, visible within the crop - reading a border means
 # seeing both sides), colored by that country's assign_country_colors() shade (same palette /map
@@ -480,7 +486,16 @@ def render_map(
                 color = unclaimed_color
             left = grid_left + (x - min_x) * tile_stride
             top = grid_top + (y - min_y) * tile_stride
-            draw.rectangle([left, top, left + tile_size - 1, top + tile_size - 1], fill=color)
+            right = left + tile_size - 1
+            bottom = top + tile_size - 1
+            draw.rectangle([left, top, right, bottom], fill=color)
+            if node is not None and node.last_captured_year == world.year:
+                inset = RECENTLY_CAPTURED_OUTLINE_WIDTH // 2
+                draw.rectangle(
+                    [left + inset, top + inset, right - inset, bottom - inset],
+                    outline=RECENTLY_CAPTURED_OUTLINE_COLOR,
+                    width=RECENTLY_CAPTURED_OUTLINE_WIDTH,
+                )
 
     legend_y = grid_top + map_height + LEGEND_TOP_MARGIN
     for row in legend_rows:

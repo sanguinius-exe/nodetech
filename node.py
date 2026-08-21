@@ -144,6 +144,11 @@ class Node:
     population_growth_rate: float = 0.0
     military_deployments: list[MilitaryDeployment] = field(default_factory=list)
     projected_population_growth_rate: float = 0.0
+    # Set by main.py's _occupy_node whenever a battle takes this tile - the in-game year it last
+    # changed hands via combat. None if it never has. The map renderers use this to highlight a
+    # tile with a bright outline for the rest of the year it was captured in (see
+    # main.py's RECENTLY_CAPTURED_OUTLINE_COLOR).
+    last_captured_year: int | None = None
 
     def get_id(self) -> str:
         return self.id
