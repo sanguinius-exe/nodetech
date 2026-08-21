@@ -350,15 +350,40 @@ def _wrap_legend(names: list[str], font: ImageFont.FreeTypeFont, max_width: floa
     return rows
 
 
-def render_map(world: World, title: Optional[str] = None, country: Optional[str] = None) -> io.BytesIO:
-    """A PNG of the world's grid (or, if `country` is given, just that country's own territory
-    plus a couple tiles of surrounding context - see _country_bounds): one filled tile per node
-    (colored by owning country, gray for unclaimed, a slightly darker shade for empty grid slots
-    with no node at all), a "Year N" badge, and a wrapped legend of every country visible in the
-    rendered region. `title` (e.g. the Discord server's name) renders top-left the way main.py's
-    map page shows the save name. Raises ValueError (via _country_bounds) if `country` doesn't
-    exist or owns no nodes. Returns a ready-to-send BytesIO, already seeked to the start."""
-    if country is not None:
+def render_map(
+    world: World,
+    title: Optional[str] = None,
+    country: Optional[str] = None,
+    center_node_id: Optional[str] = None,
+    radius: Optional[int] = None,
+) -> io.BytesIO:
+    """A PNG of the world's grid, or a cropped region of it: `country` crops to just that
+    country's own territory plus a couple tiles of context (see _country_bounds); `center_node_id`
+    instead crops to `radius` tiles (default main.py's own FRONTLINE_MAP_RADIUS, so the CLI's
+    HTML frontline map - see cmd_map_at - and this PNG version agree on how much context "the
+    frontline" means) around that one node, regardless of who owns it or the tiles around it -
+    the point is showing whichever countries are actually contesting that spot, which is exactly
+    what happens automatically after a battle changes hands (see bot.py's combat commands
+    checking World.last_captured_node_id). Giving neither crops to nothing (the whole world).
+    Every tile is colored by owning country, gray for unclaimed, a slightly darker shade for
+    empty grid slots with no node at all, with a "Year N" badge and a wrapped legend of every
+    country visible in the rendered region. `title` (e.g. the Discord server's name) renders
+    top-left the way main.py's map page shows the save name. Raises ValueError if `country`
+    doesn't exist/owns no nodes, or `center_node_id` doesn't exist. Returns a ready-to-send
+    BytesIO, already seeked to the start."""
+    if center_node_id is not None:
+        node = world.nodes.get(center_node_id)
+        if node is None:
+            raise ValueError(f"No such node '{center_node_id}'.")
+        r = radius if radius is not None else game.FRONTLINE_MAP_RADIUS
+        min_x, min_y, max_x, max_y = (
+            max(0, node.x - r),
+            max(0, node.y - r),
+            min(world.width - 1, node.x + r),
+            min(world.height - 1, node.y + r),
+        )
+        title = f"{title} - Frontline at '{center_node_id}'" if title else f"Frontline at '{center_node_id}'"
+    elif country is not None:
         min_x, min_y, max_x, max_y = _country_bounds(world, country)
         title = f"{title} - {country}" if title else country
     else:

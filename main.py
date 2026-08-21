@@ -156,6 +156,12 @@ class World:
         self.width: int = DEFAULT_GRID_SIZE
         self.height: int = DEFAULT_GRID_SIZE
         self.wars: set[frozenset[str]] = set()
+        # Set (or cleared back to None) by cmd_move_division/cmd_group_attack/cmd_clash right
+        # after combat resolves - whichever node just changed hands, if any, so any frontend can
+        # notice a capture happened without having to parse the printed battle report. The CLI/web
+        # terminal act on it directly (see cmd_map_at); the Discord bot reads it after running a
+        # combat command to decide whether to also attach a frontline PNG.
+        self.last_captured_node_id: str | None = None
 
     def add_node(self, node: Node) -> None:
         self.nodes[node.id] = node
@@ -544,11 +550,23 @@ MAP_JS = """
 """
 
 
-def build_map_html(world: World) -> str:
+def build_map_html(world: World, bounds: tuple[int, int, int, int] | None = None) -> str:
+    """`bounds`, if given, is (min_x, min_y, max_x, max_y) inclusive - only that sub-region of the
+    grid is rendered (see cmd_map_at's frontline crop), instead of the whole world (the default,
+    same as before this parameter existed). Rail edges outside the cropped region are dropped, and
+    the ones that remain get their coordinates shifted to be 0-based within the crop, since the
+    rail overlay's JS (web/index.html's buildRailOverlay) positions each line by grid coordinate
+    relative to the rendered map's own top-left corner, not the world's."""
     save_name = Path(world.save_path).stem if world.save_path else "unsaved world"
     country_colors = assign_country_colors(world)
     grid: dict[tuple[int, int], Node] = {(n.x, n.y): n for n in world.nodes.values()}
-    tile_size = max(6, min(40, 2000 // max(world.width, world.height)))
+    if bounds is None:
+        min_x, min_y, max_x, max_y = 0, 0, world.width - 1, world.height - 1
+    else:
+        min_x, min_y, max_x, max_y = bounds
+    region_width = max_x - min_x + 1
+    region_height = max_y - min_y + 1
+    tile_size = max(6, min(40, 2000 // max(region_width, region_height)))
 
     def tile_html(x: int, y: int) -> str:
         node = grid.get((x, y))
@@ -565,8 +583,8 @@ def build_map_html(world: World) -> str:
         )
 
     rows = []
-    for y in range(world.height):
-        tiles = [tile_html(x, y) for x in range(world.width)]
+    for y in range(min_y, max_y + 1):
+        tiles = [tile_html(x, y) for x in range(min_x, max_x + 1)]
         rows.append(f'<div class="map-row">{"".join(tiles)}</div>')
 
     legend_items = [
@@ -597,15 +615,20 @@ def build_map_html(world: World) -> str:
     rail_edge_ids = sorted(
         {tuple(sorted((node.id, other_id))) for node in world.nodes.values() for other_id in node.rail_connected_tiles}
     )
+
+    def _in_bounds(node: Node) -> bool:
+        return min_x <= node.x <= max_x and min_y <= node.y <= max_y
+
     rail_data = {
         "tileSize": tile_size,
         "gap": MAP_TILE_GAP_PX,
-        "width": world.width * (tile_size + MAP_TILE_GAP_PX) + MAP_TILE_GAP_PX,
-        "height": world.height * (tile_size + MAP_TILE_GAP_PX) + MAP_TILE_GAP_PX,
+        "width": region_width * (tile_size + MAP_TILE_GAP_PX) + MAP_TILE_GAP_PX,
+        "height": region_height * (tile_size + MAP_TILE_GAP_PX) + MAP_TILE_GAP_PX,
         "edges": [
-            [world.nodes[id1].x, world.nodes[id1].y, world.nodes[id2].x, world.nodes[id2].y]
+            [world.nodes[id1].x - min_x, world.nodes[id1].y - min_y, world.nodes[id2].x - min_x, world.nodes[id2].y - min_y]
             for id1, id2 in rail_edge_ids
             if id1 in world.nodes and id2 in world.nodes
+            and _in_bounds(world.nodes[id1]) and _in_bounds(world.nodes[id2])
         ],
     }
 
@@ -649,6 +672,45 @@ def cmd_map(world: World) -> None:
     path.write_text(html)
     webbrowser.open(path.as_uri())
     print(f"Map written to '{path}' and opened in your browser.")
+
+
+# How many tiles of context around a captured node cmd_map_at crops to - a 13x13 view (radius 6
+# each way), enough to see the local front without it being the whole country.
+FRONTLINE_MAP_RADIUS = 6
+
+
+def _frontline_bounds(world: World, node: Node, radius: int = FRONTLINE_MAP_RADIUS) -> tuple[int, int, int, int]:
+    return (
+        max(0, node.x - radius),
+        max(0, node.y - radius),
+        min(world.width - 1, node.x + radius),
+        min(world.height - 1, node.y + radius),
+    )
+
+
+def cmd_map_at(world: World, node_id: str) -> None:
+    """Same idea as cmd_map, but cropped to FRONTLINE_MAP_RADIUS tiles around `node_id` - called
+    automatically by cmd_move_division/cmd_group_attack/cmd_clash right after a tile actually
+    changes hands, so the newly-shifted frontline is visible without a separate manual 'map'
+    call. Silently does nothing if the node no longer exists."""
+    node = world.get_node(node_id)
+    if node is None:
+        return
+    html = build_map_html(world, bounds=_frontline_bounds(world, node))
+    path = database.ensure_save_dir() / "frontline_map.html"
+    path.write_text(html)
+    webbrowser.open(path.as_uri())
+    print(f"Frontline map centered on '{node_id}' generated.")
+
+
+def _note_capture(world: World, captured_node_id: str | None) -> None:
+    """Called right after resolve_combat/resolve_clash with whatever they returned - records it
+    on the World (for the Discord bot to notice, since it doesn't go through cmd_map_at/
+    webbrowser.open at all - see game_bridge.py) and, if a tile actually changed hands, generates
+    the frontline crop immediately (for the CLI/web terminal)."""
+    world.last_captured_node_id = captured_node_id
+    if captured_node_id is not None:
+        cmd_map_at(world, captured_node_id)
 
 
 def cmd_view(world: World, args: list[str]) -> None:
@@ -1719,7 +1781,7 @@ def _combat_strength(
 
 def resolve_combat(
     world: World, attackers: list[Division], attacker_country: str, origin: Node, destination: Node
-) -> None:
+) -> str | None:
     """One or more attacking divisions - all starting from `origin` - against every division the
     defending country has stationed at `destination`. Casualties are proportional to relative
     strength - each division's manpower, morale, equipment, and an independent random roll all
@@ -1739,7 +1801,8 @@ def resolve_combat(
     with whatever losses they took, and any defender survivor ground down below
     RETREAT_MANPOWER_THRESHOLD breaks and pulls back to a friendly neighboring node rather than
     holding a position it's no longer fit to defend (see _find_friendly_neighbor) - or holds
-    anyway, mauled, if it has nowhere to go."""
+    anyway, mauled, if it has nowhere to go. Returns the captured node's id on a clean sweep,
+    None for every other outcome (fizzle, wipeout, repelled)."""
     defender_country = destination.country
     defending_deployment = next((d for d in destination.military_deployments if d.country == defender_country), None)
     defenders = list(defending_deployment.divisions) if defending_deployment else []
@@ -1769,7 +1832,7 @@ def resolve_combat(
     )
     if total_strength <= 0:
         print("  Neither side can fight - the attack fizzles.")
-        return
+        return None
 
     attacker_loss_fraction = total_defender_strength / total_strength
     defender_loss_fraction = total_attacker_strength / total_strength
@@ -1811,7 +1874,7 @@ def resolve_combat(
 
     if not surviving_attackers:
         print("  The entire attacking force was wiped out.")
-        return
+        return None
 
     if surviving_defenders:
         print(
@@ -1841,7 +1904,7 @@ def resolve_combat(
                 f"  {defender_country} mauled and cut off, nowhere to retreat - "
                 f"{', '.join(f'{d.name} ({d.manpower})' for d in stranded)} hold '{destination.id}' anyway."
             )
-        return
+        return None
 
     # Clean sweep: every surviving attacker occupies the node and it changes hands.
     for division in surviving_attackers:
@@ -1851,6 +1914,7 @@ def resolve_combat(
         f"  '{destination.id}' falls to {attacker_country} - "
         f"{', '.join(f'{d.name} ({d.manpower})' for d in surviving_attackers)} occupy it."
     )
+    return destination.id
 
 
 def _occupy_node(world: World, node: Node, new_owner: str, old_owner: str | None, divisions: list[Division]) -> None:
@@ -1876,7 +1940,7 @@ def _occupy_node(world: World, node: Node, new_owner: str, old_owner: str | None
         new_country.nodes.append(node.id)
 
 
-def resolve_clash(world: World, country_a: str, node_a: Node, country_b: str, node_b: Node) -> None:
+def resolve_clash(world: World, country_a: str, node_a: Node, country_b: str, node_b: Node) -> str | None:
     """A mutual engagement between two forces that are *both* on the attack - unlike
     resolve_combat, where one side is a static defender getting TERRAIN_DEFENSE_MODIFIERS, here
     both sides are pressing an assault from their own ground, so both use the ATTACK terrain
@@ -1886,7 +1950,9 @@ def resolve_clash(world: World, country_a: str, node_a: Node, country_b: str, no
     survivors, who overrun it; if both sides still have survivors, neither node changes hands, but
     any survivor ground down below RETREAT_MANPOWER_THRESHOLD breaks and pulls back to a friendly
     neighboring node of its own side rather than holding a position it's no longer fit to defend -
-    or holds anyway, mauled, if it has nowhere to go."""
+    or holds anyway, mauled, if it has nowhere to go. Returns the overrun node's id if one side
+    was wiped and the other took its ground, None for every other outcome (fizzle, mutual
+    annihilation, both sides still standing)."""
     deployment_a = next((d for d in node_a.military_deployments if d.country == country_a), None)
     divisions_a = list(deployment_a.divisions) if deployment_a else []
     deployment_b = next((d for d in node_b.military_deployments if d.country == country_b), None)
@@ -1914,7 +1980,7 @@ def resolve_clash(world: World, country_a: str, node_a: Node, country_b: str, no
     )
     if total_strength <= 0:
         print("  Neither side can fight - the clash fizzles.")
-        return
+        return None
 
     loss_fraction_a = total_strength_b / total_strength
     loss_fraction_b = total_strength_a / total_strength
@@ -1951,7 +2017,7 @@ def resolve_clash(world: World, country_a: str, node_a: Node, country_b: str, no
 
     if not survivors_a and not survivors_b:
         print("  Both forces are wiped out - mutual annihilation, no ground gained either way.")
-        return
+        return None
     if not survivors_a:
         for division in survivors_b:
             deployment_b.divisions.remove(division)
@@ -1959,7 +2025,7 @@ def resolve_clash(world: World, country_a: str, node_a: Node, country_b: str, no
             node_b.military_deployments.remove(deployment_b)
         _occupy_node(world, node_a, country_b, country_a, survivors_b)
         print(f"  {country_a}'s force is wiped out - {country_b} overruns '{node_a.id}'.")
-        return
+        return node_a.id
     if not survivors_b:
         for division in survivors_a:
             deployment_a.divisions.remove(division)
@@ -1967,7 +2033,7 @@ def resolve_clash(world: World, country_a: str, node_a: Node, country_b: str, no
             node_a.military_deployments.remove(deployment_a)
         _occupy_node(world, node_b, country_a, country_b, survivors_a)
         print(f"  {country_b}'s force is wiped out - {country_a} overruns '{node_b.id}'.")
-        return
+        return node_b.id
 
     print("  Both sides still have forces standing - neither position falls, but both are bloodied.")
 
@@ -2004,6 +2070,8 @@ def resolve_clash(world: World, country_a: str, node_a: Node, country_b: str, no
                 f"  {side_country} mauled and cut off, nowhere to retreat - "
                 f"{', '.join(f'{d.name} ({d.manpower})' for d in stranded)} hold '{side_node.id}' anyway."
             )
+
+    return None
 
 
 def cmd_move_division(world: World, args: list[str]) -> None:
@@ -2042,7 +2110,7 @@ def cmd_move_division(world: World, args: list[str]) -> None:
         if origin is None:
             print(f"'{name}''s current node no longer exists - it can't attack from nowhere.")
             return
-        resolve_combat(world, [division], country_name, origin, destination)
+        _note_capture(world, resolve_combat(world, [division], country_name, origin, destination))
         return
 
     if origin is not None:
@@ -2097,7 +2165,7 @@ def cmd_group_attack(world: World, args: list[str]) -> None:
         )
         return
 
-    resolve_combat(world, attackers, country_name, origin, destination)
+    _note_capture(world, resolve_combat(world, attackers, country_name, origin, destination))
 
 
 def cmd_clash(world: World, args: list[str]) -> None:
@@ -2138,7 +2206,7 @@ def cmd_clash(world: World, args: list[str]) -> None:
         print(f"'{country_b}' has no divisions at '{node_b_id}'.")
         return
 
-    resolve_clash(world, country_a, node_a, country_b, node_b)
+    _note_capture(world, resolve_clash(world, country_a, node_a, country_b, node_b))
 
 
 def refresh_country_stats(world: World) -> None:

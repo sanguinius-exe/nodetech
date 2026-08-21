@@ -208,21 +208,48 @@ async def send_switch_backup(interaction: discord.Interaction) -> None:
     await interaction.followup.send("Backup of the world that was just replaced:", file=file)
 
 
-async def run_admin_line(interaction: discord.Interaction, line: str) -> None:
+async def run_admin_line(interaction: discord.Interaction, line: str) -> bool:
     """Shared body for every state-changing command: gate on Manage Server (or a /permit-ed
     role), defer (game commands run in a thread and can take a moment - see
-    game_bridge.run_command_async), run, reply."""
+    game_bridge.run_command_async), run, reply. Returns whether the command actually ran (False
+    if the permission gate rejected it) - run_combat_line needs this to know whether checking
+    World.last_captured_node_id afterward would see this call's result or just stale leftovers
+    from someone else's earlier command."""
     if not has_permission(interaction):
         await interaction.response.send_message(
             "You don't have permission to run this - it needs Manage Server, or a role an admin "
             "has granted with /permit.",
             ephemeral=True,
         )
-        return
+        return False
     await interaction.response.defer()
     output = await game_bridge.run_command_async(interaction.guild_id, line)
     await send_chunks(interaction, output)
     await send_switch_backup(interaction)
+    return True
+
+
+async def run_combat_line(interaction: discord.Interaction, line: str) -> None:
+    """Same as run_admin_line, for move_division/group_attack/clash specifically - afterward,
+    checks whether that command actually took a tile (game_bridge.py neuters main.py's own
+    webbrowser.open, so World.last_captured_node_id is the only signal left) and, if so, attaches
+    a frontline PNG (map_render.render_map's center_node_id mode) centered on it."""
+    ran = await run_admin_line(interaction, line)
+    if not ran:
+        return
+    world_obj = game_bridge.get_world(interaction.guild_id)
+    captured_node_id = world_obj.last_captured_node_id
+    if captured_node_id is None:
+        return
+    title = interaction.guild.name if interaction.guild else None
+    async with game_bridge.get_lock(interaction.guild_id):
+        try:
+            buffer = await asyncio.to_thread(
+                map_render.render_map, world_obj, title, None, captured_node_id
+            )
+        except ValueError:
+            return
+    await interaction.followup.send(file=discord.File(buffer, filename="frontline.png"))
 
 
 async def run_open_line(interaction: discord.Interaction, line: str) -> None:
@@ -493,14 +520,14 @@ async def deploy_reserve(interaction: discord.Interaction, country: str, name: s
 @app_commands.autocomplete(country=country_autocomplete, destination_id=node_autocomplete)
 async def move_division(interaction: discord.Interaction, country: str, name: str, destination_id: str) -> None:
     line = game_bridge.build_line("move-division", country, name, destination_id)
-    await run_admin_line(interaction, line)
+    await run_combat_line(interaction, line)
 
 
 @tree.command(description="Attack with every division a country has at one node (admins only)")
 @app_commands.autocomplete(country=country_autocomplete, origin_id=node_autocomplete, destination_id=node_autocomplete)
 async def group_attack(interaction: discord.Interaction, country: str, origin_id: str, destination_id: str) -> None:
     line = game_bridge.build_line("group-attack", country, origin_id, destination_id)
-    await run_admin_line(interaction, line)
+    await run_combat_line(interaction, line)
 
 
 @tree.command(description="Pit two forces at war against each other - both sides attack at once (admins only)")
@@ -509,7 +536,7 @@ async def clash(
     interaction: discord.Interaction, country_a: str, node_a: str, country_b: str, node_b: str
 ) -> None:
     line = game_bridge.build_line("clash", country_a, node_a, country_b, node_b)
-    await run_admin_line(interaction, line)
+    await run_combat_line(interaction, line)
 
 
 @tree.command(description="Put two countries at war (admins only)")

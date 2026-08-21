@@ -20,6 +20,16 @@ import database  # noqa: E402
 import main as game  # noqa: E402
 from main import World  # noqa: E402
 
+# main.py's own `map` command (and, automatically, cmd_map_at whenever a battle takes a tile -
+# see World.last_captured_node_id) shells out via webbrowser.open() to a real browser. The web
+# terminal's own init.js patches this to render inline instead (there's no real browser inside
+# Pyodide's sandbox); here there's a real, working webbrowser.open, but calling it would pop a
+# desktop browser tab on the machine running this bot process every time any Discord user's
+# attack captures a tile - never what's wanted for a headless bot. bot.py gets the frontline PNG
+# it actually needs (see map_render.render_frontline) by reading last_captured_node_id itself
+# after running a combat command, not through this path at all.
+game.webbrowser.open = lambda *args, **kwargs: True
+
 DATA_DIR = Path(__file__).resolve().parent / "data"
 DATA_DIR.mkdir(exist_ok=True)
 
